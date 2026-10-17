@@ -10,8 +10,10 @@ import {
   Sparkles,
   TrendingUp,
   X,
+  Zap,
 } from 'lucide-react'
 import { useStockStore, type TabType } from './store/useStockStore'
+import { OcoCalculator } from './components/OcoCalculator'
 import { NanpinCalculator } from './components/NanpinCalculator'
 import { DividendCalculator } from './components/DividendCalculator'
 import { CompoundSimulator } from './components/CompoundSimulator'
@@ -25,27 +27,33 @@ const NAV_ITEMS: {
   icon: typeof Calculator
 }[] = [
   {
+    id: 'oco',
+    label: 'OCO即算',
+    sub: '買い・空売り',
+    icon: Zap,
+  },
+  {
     id: 'nanpin',
     label: 'ナンピン',
-    sub: '平均単価・損益',
+    sub: '平均単価',
     icon: Calculator,
   },
   {
     id: 'dividend',
-    label: '配当・NISA',
+    label: '配当NISA',
     sub: '利回り・優待',
     icon: Coins,
   },
   {
     id: 'compound',
-    label: '積立・複利',
+    label: '積立複利',
     sub: '将来グラフ',
     icon: TrendingUp,
   },
   {
     id: 'notebook',
     label: '株ノート',
-    sub: '銘柄・用語集',
+    sub: '銘柄・用語',
     icon: BookMarked,
   },
 ]
@@ -74,11 +82,11 @@ export function App() {
                   かぶポケ
                 </h1>
                 <span className="px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-extrabold shrink-0">
-                  株＆NISA
+                  OCO＆株計算
                 </span>
               </div>
               <p className="text-[10px] text-slate-400 font-medium truncate">
-                自動保存＆スプレッドシート連携対応
+                デイトレOCO・ナンピン・NISAシミュレーター
               </p>
             </div>
           </div>
@@ -128,6 +136,7 @@ export function App() {
 
         {/* Main Scrollable Content Area */}
         <main className="flex-1 px-3.5 pt-3.5 pb-24 overflow-x-hidden">
+          {activeTab === 'oco' && <OcoCalculator />}
           {activeTab === 'nanpin' && <NanpinCalculator />}
           {activeTab === 'dividend' && <DividendCalculator />}
           {activeTab === 'compound' && <CompoundSimulator />}
@@ -135,8 +144,8 @@ export function App() {
         </main>
 
         {/* Fixed Bottom Navigation Bar */}
-        <nav className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md z-40 bg-white/95 backdrop-blur-md border-t border-slate-200/90 px-2 pt-1.5 pb-safe shadow-[0_-4px_20px_rgba(15,23,42,0.06)]">
-          <div className="grid grid-cols-4 gap-1">
+        <nav className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md z-40 bg-white/95 backdrop-blur-md border-t border-slate-200/90 px-1.5 pt-1.5 pb-safe shadow-[0_-4px_20px_rgba(15,23,42,0.06)]">
+          <div className="grid grid-cols-5 gap-0.5">
             {NAV_ITEMS.map((item) => {
               const Icon = item.icon
               const isActive = activeTab === item.id
@@ -148,7 +157,7 @@ export function App() {
                     setActiveTab(item.id)
                     window.scrollTo({ top: 0, behavior: 'smooth' })
                   }}
-                  className={`flex flex-col items-center justify-center py-1.5 px-1 rounded-2xl transition active:scale-95 ${
+                  className={`flex flex-col items-center justify-center py-1.5 px-0.5 rounded-2xl transition active:scale-95 ${
                     isActive
                       ? 'text-emerald-600 bg-emerald-50/80 font-extrabold'
                       : 'text-slate-400 hover:text-slate-600 font-medium'
@@ -164,10 +173,10 @@ export function App() {
                       <span className="absolute -top-1 -right-1.5 w-1.5 h-1.5 rounded-full bg-emerald-500" />
                     )}
                   </div>
-                  <span className="text-[11px] mt-1 leading-none">
+                  <span className="text-[10px] mt-1 leading-none tracking-tight">
                     {item.label}
                   </span>
-                  <span className="text-[9px] text-slate-400 mt-0.5 leading-none">
+                  <span className="text-[8px] text-slate-400 mt-0.5 leading-none tracking-tight">
                     {item.sub}
                   </span>
                 </button>

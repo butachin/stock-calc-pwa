@@ -1,9 +1,35 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
-export type TabType = 'nanpin' | 'dividend' | 'compound' | 'notebook'
+export type TabType = 'oco' | 'nanpin' | 'dividend' | 'compound' | 'notebook'
 
 export type StockTag = '保有中' | '気になる' | 'NISA候補'
+export type OcoSide = 'long' | 'short'
+
+export interface OcoState {
+  side: OcoSide
+  priceInput: string
+  sharesInput: string
+  manualShares: boolean
+  tpPercent: number
+  slPercent: number
+  budgetYen: number
+  memoLabel: string
+}
+
+export interface OcoHistoryItem {
+  id: string
+  side: OcoSide
+  label: string
+  entryPrice: number
+  shares: number
+  tpPrice: number
+  slPrice: number
+  tpProfit: number
+  slLoss: number
+  totalCost: number
+  createdAt: string
+}
 
 export interface SavedStock {
   id: string
@@ -61,6 +87,8 @@ export interface CompoundState {
 interface StockStore {
   activeTab: TabType
   toastMessage: string | null
+  oco: OcoState
+  ocoHistory: OcoHistoryItem[]
   nanpin: NanpinState
   nanpinHistory: NanpinHistoryItem[]
   dividend: DividendState
@@ -76,6 +104,13 @@ interface StockStore {
 
   setActiveTab: (tab: TabType) => void
   showToast: (msg: string) => void
+
+  // OCO Actions
+  updateOco: (partial: Partial<OcoState>) => void
+  saveOcoHistory: (item: Omit<OcoHistoryItem, 'id' | 'createdAt'>) => void
+  deleteOcoHistory: (id: string) => void
+
+  // Nanpin Actions
   updateNanpin: (partial: Partial<NanpinState>) => void
   resetNanpin: () => void
   saveNanpinHistory: (item: Omit<NanpinHistoryItem, 'id' | 'createdAt'>) => void
@@ -89,11 +124,23 @@ interface StockStore {
   deleteSavedStock: (id: string) => void
   loadStockToNanpin: (stock: SavedStock) => void
   loadStockToDividend: (stock: SavedStock) => void
+  loadStockToOco: (stock: SavedStock, side?: OcoSide) => void
 
   // Google Spreadsheet Sync Actions
   setSyncConfig: (config: { gasUrl?: string; syncPasscode?: string; autoSync?: boolean }) => void
   pushToSheet: (silent?: boolean) => Promise<boolean>
   pullFromSheet: () => Promise<boolean>
+}
+
+const DEFAULT_OCO: OcoState = {
+  side: 'long',
+  priceInput: '354',
+  sharesInput: '1100',
+  manualShares: false,
+  tpPercent: 4.0,
+  slPercent: 1.5,
+  budgetYen: 400000,
+  memoLabel: '',
 }
 
 const DEFAULT_NANPIN: NanpinState = {
@@ -170,8 +217,10 @@ let toastTimer: ReturnType<typeof setTimeout> | null = null
 export const useStockStore = create<StockStore>()(
   persist(
     (set, get) => ({
-      activeTab: 'nanpin',
+      activeTab: 'oco',
       toastMessage: null,
+      oco: DEFAULT_OCO,
+      ocoHistory: [],
       nanpin: DEFAULT_NANPIN,
       nanpinHistory: [],
       dividend: DEFAULT_DIVIDEND,
@@ -191,7 +240,38 @@ export const useStockStore = create<StockStore>()(
         set({ toastMessage: msg })
         toastTimer = setTimeout(() => {
           set({ toastMessage: null })
-        }, 2800)
+        }, 2600)
+      },
+
+      updateOco: (partial) =>
+        set((state) => ({
+          oco: { ...state.oco, ...partial },
+        })),
+
+      saveOcoHistory: (item) => {
+        const now = new Date()
+        const timeStr = `${now.getMonth() + 1}/${now.getDate()} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+        const newItem: OcoHistoryItem = {
+          ...item,
+          id: `oco-${Date.now()}`,
+          createdAt: timeStr,
+        }
+        set((state) => ({
+          ocoHistory: [newItem, ...state.ocoHistory].slice(0, 20),
+        }))
+        get().showToast('OCO計算メモを保存しました')
+        if (get().gasUrl && get().autoSync) {
+          void get().pushToSheet(true)
+        }
+      },
+
+      deleteOcoHistory: (id) => {
+        set((state) => ({
+          ocoHistory: state.ocoHistory.filter((item) => item.id !== id),
+        }))
+        if (get().gasUrl && get().autoSync) {
+          void get().pushToSheet(true)
+        }
       },
 
       updateNanpin: (partial) =>
@@ -313,6 +393,24 @@ export const useStockStore = create<StockStore>()(
         get().showToast(`「${stock.name}」を配当シミュレーターに読み込みました`)
       },
 
+      loadStockToOco: (stock, side = 'long') => {
+        const budget = get().oco.budgetYen || 400000
+        const p = stock.currentPrice || 354
+        const autoS = Math.max(100, Math.floor(budget / p / 100) * 100)
+        set({
+          activeTab: 'oco',
+          oco: {
+            ...get().oco,
+            side,
+            priceInput: String(p),
+            sharesInput: String(autoS),
+            manualShares: false,
+            memoLabel: stock.name,
+          },
+        })
+        get().showToast(`「${stock.name}」をOCO電卓に読み込みました`)
+      },
+
       setSyncConfig: (config) =>
         set((state) => ({
           gasUrl: config.gasUrl !== undefined ? config.gasUrl.trim() : state.gasUrl,
@@ -322,14 +420,13 @@ export const useStockStore = create<StockStore>()(
         })),
 
       pushToSheet: async (silent = false) => {
-        const { gasUrl, syncPasscode, savedStocks, nanpinHistory } = get()
+        const { gasUrl, syncPasscode, savedStocks, nanpinHistory, ocoHistory } = get()
         if (!gasUrl) {
           if (!silent) get().showToast('スプレッドシートのURLを設定してください')
           return false
         }
         set({ isSyncing: true })
         try {
-          // Using text/plain avoids CORS preflight OPTIONS failure on Google Apps Script
           const res = await fetch(gasUrl, {
             method: 'POST',
             headers: {
@@ -340,6 +437,7 @@ export const useStockStore = create<StockStore>()(
               passcode: syncPasscode,
               savedStocks,
               nanpinHistory,
+              ocoHistory,
             }),
             redirect: 'follow',
           })
@@ -396,6 +494,9 @@ export const useStockStore = create<StockStore>()(
               nanpinHistory: Array.isArray(data.nanpinHistory)
                 ? data.nanpinHistory
                 : state.nanpinHistory,
+              ocoHistory: Array.isArray(data.ocoHistory)
+                ? data.ocoHistory
+                : state.ocoHistory,
               lastSyncedAt: data.updatedAt || 'たった今',
               isSyncing: false,
             }))
@@ -414,9 +515,11 @@ export const useStockStore = create<StockStore>()(
       },
     }),
     {
-      name: 'kabu-pocket-storage-v1',
+      name: 'kabu-pocket-storage-v2',
       partialize: (state) => ({
         activeTab: state.activeTab,
+        oco: state.oco,
+        ocoHistory: state.ocoHistory,
         nanpin: state.nanpin,
         nanpinHistory: state.nanpinHistory,
         dividend: state.dividend,

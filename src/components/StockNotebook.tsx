@@ -74,6 +74,7 @@ export const StockNotebook: React.FC = () => {
     deleteSavedStock,
     loadStockToNanpin,
     loadStockToDividend,
+    loadStockToOco,
   } = useStockStore()
 
   const [subTab, setSubTab] = useState<'stocks' | 'study'>('stocks')
@@ -443,22 +444,29 @@ export const StockNotebook: React.FC = () => {
                   )}
 
                   {/* Quick Jump Actions */}
-                  <div className="grid grid-cols-2 gap-2 pt-0.5">
+                  <div className="grid grid-cols-3 gap-1.5 pt-0.5">
+                    <button
+                      type="button"
+                      onClick={() => loadStockToOco(stock, 'long')}
+                      className="py-2 px-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-bold flex items-center justify-center gap-1 active:scale-95 transition"
+                    >
+                      ⚡ OCO即算
+                    </button>
                     <button
                       type="button"
                       onClick={() => loadStockToNanpin(stock)}
-                      className="py-2 px-3 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-xs font-bold flex items-center justify-center gap-1.5 active:scale-95 transition"
+                      className="py-2 px-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-[11px] font-bold flex items-center justify-center gap-1 active:scale-95 transition"
                     >
-                      <Calculator className="w-3.5 h-3.5 text-emerald-600" />
-                      ナンピン計算へ反映
+                      <Calculator className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      ナンピン
                     </button>
                     <button
                       type="button"
                       onClick={() => loadStockToDividend(stock)}
-                      className="py-2 px-3 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 text-xs font-bold flex items-center justify-center gap-1.5 active:scale-95 transition"
+                      className="py-2 px-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 text-[11px] font-bold flex items-center justify-center gap-1 active:scale-95 transition"
                     >
-                      <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
-                      配当シミュへ反映
+                      <Sparkles className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                      配当NISA
                     </button>
                   </div>
                 </div>

@@ -10,13 +10,13 @@
  *    - 次のユーザーとして実行：「自分」
  *    - アクセスできるユーザー：「全員」
  * 6. 「デプロイ」を押して表示される「ウェブアプリのURL (https://script.google.com/macros/s/.../exec)」を
- *    かぶポケアプリの「スプレッドシート連携」画面に貼り付ければ完了です！
+ *    かぶポケアプリの「シート連携」画面に貼り付ければ完了です！
  */
 
-// 必要に応じて合言葉（パスコード）を設定できます（空欄 '' ならチェックなし）
 const SECRET_PASSCODE = '';
 
 const SHEET_STOCKS = 'マイ銘柄';
+const SHEET_OCO = 'OCO履歴';
 const SHEET_HISTORY = 'ナンピン履歴';
 
 function doGet(e) {
@@ -43,11 +43,15 @@ function handleRequest(payload) {
 
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const stocksSheet = ensureStocksSheet(ss);
+    const ocoSheet = ensureOcoSheet(ss);
     const historySheet = ensureHistorySheet(ss);
 
     if (payload.action === 'save') {
       if (Array.isArray(payload.savedStocks)) {
         writeStocks(stocksSheet, payload.savedStocks);
+      }
+      if (Array.isArray(payload.ocoHistory)) {
+        writeOco(ocoSheet, payload.ocoHistory);
       }
       if (Array.isArray(payload.nanpinHistory)) {
         writeHistory(historySheet, payload.nanpinHistory);
@@ -61,11 +65,13 @@ function handleRequest(payload) {
 
     // Default: action === 'load'
     const savedStocks = readStocks(stocksSheet);
+    const ocoHistory = readOco(ocoSheet);
     const nanpinHistory = readHistory(historySheet);
 
     return jsonResponse({
       ok: true,
       savedStocks: savedStocks,
+      ocoHistory: ocoHistory,
       nanpinHistory: nanpinHistory,
       updatedAt: Utilities.formatDate(new Date(), 'Asia/Tokyo', 'MM/dd HH:mm'),
     });
@@ -95,6 +101,34 @@ function ensureStocksSheet(ss) {
     sheet
       .getRange(1, 1, 1, headers.length)
       .setBackground('#059669')
+      .setFontColor('#ffffff')
+      .setFontWeight('bold');
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+function ensureOcoSheet(ss) {
+  let sheet = ss.getSheetByName(SHEET_OCO);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_OCO);
+    const headers = [
+      'ID',
+      '売買区分',
+      '銘柄・ラベル',
+      'エントリー価格',
+      '株数',
+      '利確指値',
+      '逆指値損切',
+      '想定利益',
+      '想定損失',
+      '投資金額',
+      '作成日時',
+    ];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet
+      .getRange(1, 1, 1, headers.length)
+      .setBackground('#1e293b')
       .setFontColor('#ffffff')
       .setFontWeight('bold');
     sheet.setFrozenRows(1);
@@ -174,6 +208,56 @@ function readStocks(sheet) {
         tag: r[8] === '保有中' || r[8] === 'NISA候補' ? r[8] : '気になる',
         memo: String(r[9] || ''),
         updatedAt: String(r[10] || 'シート同期'),
+      };
+    });
+}
+
+function writeOco(sheet, ocoList) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    sheet.getRange(2, 1, lastRow - 1, 11).clearContent();
+  }
+  if (!ocoList.length) return;
+
+  const rows = ocoList.map(function (o) {
+    return [
+      o.id || 'oco-' + new Date().getTime(),
+      o.side === 'short' ? '空売り' : '買い',
+      o.label || '',
+      Number(o.entryPrice) || 0,
+      Number(o.shares) || 0,
+      Number(o.tpPrice) || 0,
+      Number(o.slPrice) || 0,
+      Number(o.tpProfit) || 0,
+      Number(o.slLoss) || 0,
+      Number(o.totalCost) || 0,
+      o.createdAt || '',
+    ];
+  });
+  sheet.getRange(2, 1, rows.length, 11).setValues(rows);
+}
+
+function readOco(sheet) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return [];
+  const values = sheet.getRange(2, 1, lastRow - 1, 11).getValues();
+  return values
+    .filter(function (r) {
+      return Number(r[3]) > 0;
+    })
+    .map(function (r, idx) {
+      return {
+        id: String(r[0] || 'oco-' + idx),
+        side: String(r[1]) === '空売り' ? 'short' : 'long',
+        label: String(r[2] || ''),
+        entryPrice: Number(r[3]) || 0,
+        shares: Number(r[4]) || 100,
+        tpPrice: Number(r[5]) || 0,
+        slPrice: Number(r[6]) || 0,
+        tpProfit: Number(r[7]) || 0,
+        slLoss: Number(r[8]) || 0,
+        totalCost: Number(r[9]) || 0,
+        createdAt: String(r[10] || ''),
       };
     });
 }
