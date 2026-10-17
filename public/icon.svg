@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#10b981" />
+      <stop offset="55%" stop-color="#059669" />
+      <stop offset="100%" stop-color="#0d9488" />
+    </linearGradient>
+    <linearGradient id="coinGrad" x1="160" y1="120" x2="360" y2="380" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#fde68a" />
+      <stop offset="100%" stop-color="#f59e0b" />
+    </linearGradient>
+  </defs>
+  <!-- App Squircle Background -->
+  <rect width="512" height="512" rx="116" fill="url(#bgGrad)" />
+  <circle cx="410" cy="100" r="140" fill="#ffffff" fill-opacity="0.08" />
+  <circle cx="90" cy="420" r="120" fill="#ffffff" fill-opacity="0.06" />
+
+  <!-- Rising Bar Chart Base -->
+  <rect x="116" y="300" width="52" height="96" rx="16" fill="#ffffff" fill-opacity="0.55" />
+  <rect x="194" y="248" width="52" height="148" rx="16" fill="#ffffff" fill-opacity="0.75" />
+  <rect x="272" y="188" width="52" height="208" rx="16" fill="#ffffff" fill-opacity="0.92" />
+  <rect x="350" y="128" width="52" height="268" rx="16" fill="#ffffff" />
+
+  <!-- Cute Sprout / Leaf on Top Left -->
+  <path d="M168 188C168 148 202 118 242 118C242 158 212 188 168 188Z" fill="#a7f3d0" />
+  <path d="M168 188C168 156 140 132 108 132C108 164 136 188 168 188Z" fill="#6ee7b7" />
+  <path d="M168 184V216" stroke="#a7f3d0" stroke-width="12" stroke-linecap="round" />
+
+  <!-- Gold Coin Badge -->
+  <circle cx="376" cy="128" r="50" fill="url(#coinGrad)" stroke="#ffffff" stroke-width="10" />
+  <text x="376" y="146" text-anchor="middle" fill="#92400e" font-family="system-ui, sans-serif" font-weight="800" font-size="52">¥</text>
+</svg>
