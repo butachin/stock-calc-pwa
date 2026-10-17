@@ -46,7 +46,7 @@ export const OcoCalculator: React.FC = () => {
     : 100
 
   const activeShares = manualShares
-    ? parseInt(sharesInput, 10) || 100
+    ? Math.max(0, parseInt(sharesInput, 10) || 0)
     : autoShares
 
   // Calculate Long (買い)
@@ -77,7 +77,6 @@ export const OcoCalculator: React.FC = () => {
   const totalCost = isValidPrice ? Math.round(p * activeShares) : 0
   const isOverBudget = totalCost > 500000
 
-  // Handlers matching her HTML's calc() and calc(true)
   const handlePriceChange = (raw: string) => {
     const parsed = parseFloat(raw)
     if (!manualShares && Number.isFinite(parsed) && parsed > 0) {
@@ -92,14 +91,6 @@ export const OcoCalculator: React.FC = () => {
   }
 
   const handleSharesChange = (raw: string) => {
-    if (raw === '') {
-      // Just like her HTML: if shares input is cleared, revert to auto calculation!
-      updateOco({
-        sharesInput: isValidPrice ? String(autoShares) : '',
-        manualShares: false,
-      })
-      return
-    }
     updateOco({
       sharesInput: raw,
       manualShares: true,
