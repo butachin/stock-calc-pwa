@@ -4,6 +4,8 @@ import {
   Calculator,
   CheckCircle2,
   Coins,
+  FileSpreadsheet,
+  Loader2,
   Smartphone,
   Sparkles,
   TrendingUp,
@@ -14,6 +16,7 @@ import { NanpinCalculator } from './components/NanpinCalculator'
 import { DividendCalculator } from './components/DividendCalculator'
 import { CompoundSimulator } from './components/CompoundSimulator'
 import { StockNotebook } from './components/StockNotebook'
+import { SheetSyncModal } from './components/SheetSyncModal'
 
 const NAV_ITEMS: {
   id: TabType
@@ -48,44 +51,69 @@ const NAV_ITEMS: {
 ]
 
 export function App() {
-  const { activeTab, setActiveTab, toastMessage } = useStockStore()
+  const { activeTab, setActiveTab, toastMessage, gasUrl, isSyncing } =
+    useStockStore()
   const [showPwaGuide, setShowPwaGuide] = useState(false)
+  const [showSheetSync, setShowSheetSync] = useState(false)
 
   return (
     <div className="min-h-screen bg-slate-200/70 flex justify-center">
       {/* Mobile-first App Container */}
       <div className="w-full max-w-md min-h-screen bg-slate-50 flex flex-col relative shadow-2xl shadow-slate-900/10">
         {/* Top App Bar */}
-        <header className="sticky top-0 z-30 bg-white/90 backdrop-blur-md border-b border-slate-200/80 px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
+        <header className="sticky top-0 z-30 bg-white/90 backdrop-blur-md border-b border-slate-200/80 px-3.5 py-2.5 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
             <img
               src="/icon.svg"
               alt="かぶポケ"
-              className="w-9 h-9 rounded-xl shadow-xs"
+              className="w-8 h-8 rounded-xl shadow-xs shrink-0"
             />
-            <div>
+            <div className="min-w-0">
               <div className="flex items-center gap-1.5">
-                <h1 className="text-base font-extrabold tracking-tight text-slate-900">
+                <h1 className="text-base font-extrabold tracking-tight text-slate-900 truncate">
                   かぶポケ
                 </h1>
-                <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-extrabold">
-                  株計算＆NISA
+                <span className="px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-extrabold shrink-0">
+                  株＆NISA
                 </span>
               </div>
-              <p className="text-[11px] text-slate-400 font-medium">
-                自動保存つき・スマホ専用株シミュレーター
+              <p className="text-[10px] text-slate-400 font-medium truncate">
+                自動保存＆スプレッドシート連携対応
               </p>
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={() => setShowPwaGuide(true)}
-            className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold flex items-center gap-1 active:scale-95 transition"
-          >
-            <Smartphone className="w-3.5 h-3.5 text-emerald-600" />
-            <span>ホーム画面へ追加</span>
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => setShowSheetSync(true)}
+              className={`px-2.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 border active:scale-95 transition ${
+                gasUrl
+                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                  : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-transparent'
+              }`}
+            >
+              {isSyncing ? (
+                <Loader2 className="w-3.5 h-3.5 text-emerald-600 animate-spin" />
+              ) : (
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+              )}
+              <span>シート連携</span>
+              {gasUrl && (
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowPwaGuide(true)}
+              className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 active:scale-95 transition"
+              aria-label="ホーム画面に追加する方法"
+              title="ホーム画面に追加する方法"
+            >
+              <Smartphone className="w-4 h-4 text-slate-600" />
+            </button>
+          </div>
         </header>
 
         {/* Floating Toast Notification */}
@@ -147,6 +175,11 @@ export function App() {
             })}
           </div>
         </nav>
+
+        {/* Google Spreadsheet Sync Modal */}
+        {showSheetSync && (
+          <SheetSyncModal onClose={() => setShowSheetSync(false)} />
+        )}
 
         {/* PWA Home Screen Installation Guide Modal */}
         {showPwaGuide && (

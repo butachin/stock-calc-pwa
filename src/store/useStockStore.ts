@@ -67,6 +67,13 @@ interface StockStore {
   compound: CompoundState
   savedStocks: SavedStock[]
 
+  // Google Spreadsheet Sync State
+  gasUrl: string
+  syncPasscode: string
+  autoSync: boolean
+  lastSyncedAt: string | null
+  isSyncing: boolean
+
   setActiveTab: (tab: TabType) => void
   showToast: (msg: string) => void
   updateNanpin: (partial: Partial<NanpinState>) => void
@@ -82,6 +89,11 @@ interface StockStore {
   deleteSavedStock: (id: string) => void
   loadStockToNanpin: (stock: SavedStock) => void
   loadStockToDividend: (stock: SavedStock) => void
+
+  // Google Spreadsheet Sync Actions
+  setSyncConfig: (config: { gasUrl?: string; syncPasscode?: string; autoSync?: boolean }) => void
+  pushToSheet: (silent?: boolean) => Promise<boolean>
+  pullFromSheet: () => Promise<boolean>
 }
 
 const DEFAULT_NANPIN: NanpinState = {
@@ -166,6 +178,12 @@ export const useStockStore = create<StockStore>()(
       compound: DEFAULT_COMPOUND,
       savedStocks: INITIAL_SAVED_STOCKS,
 
+      gasUrl: import.meta.env.VITE_GAS_URL || '',
+      syncPasscode: '',
+      autoSync: true,
+      lastSyncedAt: null,
+      isSyncing: false,
+
       setActiveTab: (tab) => set({ activeTab: tab }),
 
       showToast: (msg) => {
@@ -198,12 +216,19 @@ export const useStockStore = create<StockStore>()(
           nanpinHistory: [newItem, ...state.nanpinHistory].slice(0, 15),
         }))
         get().showToast('計算結果を履歴に保存しました')
+        if (get().gasUrl && get().autoSync) {
+          void get().pushToSheet(true)
+        }
       },
 
-      deleteNanpinHistory: (id) =>
+      deleteNanpinHistory: (id) => {
         set((state) => ({
           nanpinHistory: state.nanpinHistory.filter((item) => item.id !== id),
-        })),
+        }))
+        if (get().gasUrl && get().autoSync) {
+          void get().pushToSheet(true)
+        }
+      },
 
       updateDividend: (partial) =>
         set((state) => ({
@@ -227,6 +252,9 @@ export const useStockStore = create<StockStore>()(
           savedStocks: [newStock, ...state.savedStocks],
         }))
         get().showToast(`「${stock.name}」をマイ銘柄に保存しました`)
+        if (get().gasUrl && get().autoSync) {
+          void get().pushToSheet(true)
+        }
       },
 
       updateSavedStock: (id, partial) => {
@@ -238,6 +266,9 @@ export const useStockStore = create<StockStore>()(
           ),
         }))
         get().showToast('銘柄メモを更新しました')
+        if (get().gasUrl && get().autoSync) {
+          void get().pushToSheet(true)
+        }
       },
 
       deleteSavedStock: (id) => {
@@ -245,6 +276,9 @@ export const useStockStore = create<StockStore>()(
           savedStocks: state.savedStocks.filter((s) => s.id !== id),
         }))
         get().showToast('銘柄メモを削除しました')
+        if (get().gasUrl && get().autoSync) {
+          void get().pushToSheet(true)
+        }
       },
 
       loadStockToNanpin: (stock) => {
@@ -278,6 +312,106 @@ export const useStockStore = create<StockStore>()(
         })
         get().showToast(`「${stock.name}」を配当シミュレーターに読み込みました`)
       },
+
+      setSyncConfig: (config) =>
+        set((state) => ({
+          gasUrl: config.gasUrl !== undefined ? config.gasUrl.trim() : state.gasUrl,
+          syncPasscode:
+            config.syncPasscode !== undefined ? config.syncPasscode.trim() : state.syncPasscode,
+          autoSync: config.autoSync !== undefined ? config.autoSync : state.autoSync,
+        })),
+
+      pushToSheet: async (silent = false) => {
+        const { gasUrl, syncPasscode, savedStocks, nanpinHistory } = get()
+        if (!gasUrl) {
+          if (!silent) get().showToast('スプレッドシートのURLを設定してください')
+          return false
+        }
+        set({ isSyncing: true })
+        try {
+          // Using text/plain avoids CORS preflight OPTIONS failure on Google Apps Script
+          const res = await fetch(gasUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'text/plain;charset=utf-8',
+            },
+            body: JSON.stringify({
+              action: 'save',
+              passcode: syncPasscode,
+              savedStocks,
+              nanpinHistory,
+            }),
+            redirect: 'follow',
+          })
+          const data = await res.json()
+          if (data && data.ok) {
+            set({
+              lastSyncedAt: data.updatedAt || 'たった今',
+              isSyncing: false,
+            })
+            if (!silent) {
+              get().showToast('Googleスプレッドシートへ保存しました！')
+            }
+            return true
+          } else {
+            throw new Error(data?.error || '保存に失敗しました')
+          }
+        } catch (err) {
+          set({ isSyncing: false })
+          if (!silent) {
+            get().showToast(
+              `同期エラー: ${err instanceof Error ? err.message : 'URLを確認してください'}`
+            )
+          }
+          return false
+        }
+      },
+
+      pullFromSheet: async () => {
+        const { gasUrl, syncPasscode } = get()
+        if (!gasUrl) {
+          get().showToast('スプレッドシートのURLを設定してください')
+          return false
+        }
+        set({ isSyncing: true })
+        try {
+          const res = await fetch(gasUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'text/plain;charset=utf-8',
+            },
+            body: JSON.stringify({
+              action: 'load',
+              passcode: syncPasscode,
+            }),
+            redirect: 'follow',
+          })
+          const data = await res.json()
+          if (data && data.ok) {
+            set((state) => ({
+              savedStocks:
+                Array.isArray(data.savedStocks) && data.savedStocks.length > 0
+                  ? data.savedStocks
+                  : state.savedStocks,
+              nanpinHistory: Array.isArray(data.nanpinHistory)
+                ? data.nanpinHistory
+                : state.nanpinHistory,
+              lastSyncedAt: data.updatedAt || 'たった今',
+              isSyncing: false,
+            }))
+            get().showToast('スプレッドシートから最新データを読み込みました！')
+            return true
+          } else {
+            throw new Error(data?.error || '読み込みに失敗しました')
+          }
+        } catch (err) {
+          set({ isSyncing: false })
+          get().showToast(
+            `読込エラー: ${err instanceof Error ? err.message : 'URLを確認してください'}`
+          )
+          return false
+        }
+      },
     }),
     {
       name: 'kabu-pocket-storage-v1',
@@ -288,6 +422,10 @@ export const useStockStore = create<StockStore>()(
         dividend: state.dividend,
         compound: state.compound,
         savedStocks: state.savedStocks,
+        gasUrl: state.gasUrl,
+        syncPasscode: state.syncPasscode,
+        autoSync: state.autoSync,
+        lastSyncedAt: state.lastSyncedAt,
       }),
     }
   )
