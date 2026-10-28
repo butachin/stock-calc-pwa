@@ -5,14 +5,17 @@ export type TabType = 'oco' | 'nanpin' | 'dividend' | 'compound' | 'notebook'
 
 export type StockTag = '保有中' | '気になる' | 'NISA候補'
 export type OcoSide = 'long' | 'short'
+export type StopLossMode = 'percent' | 'fixed'
 
 export interface OcoState {
   side: OcoSide
+  stopLossMode: StopLossMode
   priceInput: string
   sharesInput: string
   manualShares: boolean
   tpPercent: number
   slPercent: number
+  slFixedYen: number
   budgetYen: number
   memoLabel: string
 }
@@ -134,11 +137,13 @@ interface StockStore {
 
 const DEFAULT_OCO: OcoState = {
   side: 'long',
+  stopLossMode: 'percent',
   priceInput: '354',
   sharesInput: '1100',
   manualShares: false,
   tpPercent: 4.0,
   slPercent: 1.5,
+  slFixedYen: 5000,
   budgetYen: 400000,
   memoLabel: '',
 }

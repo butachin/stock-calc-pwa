@@ -10,7 +10,7 @@ import {
   Trash2,
   Zap,
 } from 'lucide-react'
-import { useStockStore } from '../store/useStockStore'
+import { useStockStore, type StopLossMode } from '../store/useStockStore'
 import { formatNumber, formatYen } from '../utils/format'
 
 export const OcoCalculator: React.FC = () => {
@@ -37,10 +37,18 @@ export const OcoCalculator: React.FC = () => {
     memoLabel,
   } = oco
 
+  // Ensure backward-compatible defaults if persisted state predates stopLossMode
+  const stopLossMode: StopLossMode = oco.stopLossMode ?? 'percent'
+  const slFixedYen: number = oco.slFixedYen ?? 5000
+
+  const setStopLossMode = (mode: StopLossMode) => {
+    updateOco({ stopLossMode: mode })
+  }
+
   const p = parseFloat(priceInput)
   const isValidPrice = Number.isFinite(p) && p > 0
 
-  // Auto shares calculation (same logic as her HTML: Math.max(100, Math.floor(400000 / p / 100) * 100))
+  // Auto shares calculation (1枠40万円目安で100株単位を自動計算)
   const autoShares = isValidPrice
     ? Math.max(100, Math.floor(budgetYen / p / 100) * 100)
     : 100
@@ -49,38 +57,88 @@ export const OcoCalculator: React.FC = () => {
     ? Math.max(0, parseInt(sharesInput, 10) || 0)
     : autoShares
 
-  // Calculate Long (買い)
-  const longTp = isValidPrice ? Math.round(p * (1 + tpPercent / 100)) : 0
-  const longSl = isValidPrice ? Math.round(p * (1 - slPercent / 100)) : 0
-  const longTpDiff = isValidPrice ? longTp - p : 0
-  const longSlDiff = isValidPrice ? longSl - p : 0 // negative
-  const longTpProfit = Math.round(longTpDiff * activeShares)
-  const longSlLoss = Math.round(longSlDiff * activeShares) // negative
-
-  // Calculate Short (空売り)
-  const shortTp = isValidPrice ? Math.round(p * (1 - tpPercent / 100)) : 0
-  const shortSl = isValidPrice ? Math.round(p * (1 + slPercent / 100)) : 0
-  const shortTpDiff = isValidPrice ? shortTp - p : 0 // negative price change = profit
-  const shortSlDiff = isValidPrice ? shortSl - p : 0 // positive price change = loss
-  const shortTpProfit = Math.round((p - shortTp) * activeShares) // positive profit
-  const shortSlLoss = Math.round((p - shortSl) * activeShares) // negative loss
-
-  // Active side values
   const isLong = side === 'long'
+
+  // =========================================================
+  // 1. 利確指値 (Take Profit) 計算
+  // =========================================================
+  const longTp = isValidPrice ? Math.round(p * (1 + tpPercent / 100)) : 0
+  const longTpDiff = isValidPrice ? longTp - p : 0
+  const longTpProfit = Math.round(longTpDiff * activeShares)
+
+  const shortTp = isValidPrice ? Math.round(p * (1 - tpPercent / 100)) : 0
+  const shortTpDiff = isValidPrice ? shortTp - p : 0 // negative diff = profit for short
+  const shortTpProfit = Math.round((p - shortTp) * activeShares)
+
   const activeTp = isLong ? longTp : shortTp
-  const activeSl = isLong ? longSl : shortSl
   const activeTpDiff = isLong ? longTpDiff : shortTpDiff
-  const activeSlDiff = isLong ? longSlDiff : shortSlDiff
   const activeTpProfit = isLong ? longTpProfit : shortTpProfit
-  const activeSlLoss = isLong ? longSlLoss : shortSlLoss
+
+  // =========================================================
+  // 2. 逆指値損切 (Stop Loss) モード別計算
+  // =========================================================
+  // 【モードA：比率指定（-1.5%）】
+  // 買い: Math.floor(買値 * (1 - 0.015))
+  // 空売り: Math.ceil(売値 * (1 + 0.015))
+  const longSlPercentPrice = isValidPrice
+    ? Math.floor(p * (1 - slPercent / 100))
+    : 0
+  const longSlPercentWidth = isValidPrice ? p - longSlPercentPrice : 0
+  const longSlPercentLoss = -(longSlPercentWidth * activeShares)
+
+  const shortSlPercentPrice = isValidPrice
+    ? Math.ceil(p * (1 + slPercent / 100))
+    : 0
+  const shortSlPercentWidth = isValidPrice ? shortSlPercentPrice - p : 0
+  const shortSlPercentLoss = -(shortSlPercentWidth * activeShares)
+
+  // 【モードB：金額指定（-5,000円以内）】
+  // 1株あたりの許容値幅 = Math.floor(5000 / 株数)
+  const allowedDiffPerShare =
+    activeShares > 0 ? Math.floor(slFixedYen / activeShares) : 0
+  const longSlFixedPrice = isValidPrice
+    ? Math.max(0, p - allowedDiffPerShare)
+    : 0
+  const shortSlFixedPrice = isValidPrice ? p + allowedDiffPerShare : 0
+  const fixedChangeRateAbs =
+    isValidPrice && p > 0 ? (allowedDiffPerShare / p) * 100 : 0
+  const fixedSlLoss = -(allowedDiffPerShare * activeShares)
+
+  // Active Stop Loss values for Long & Short
+  const longSl =
+    stopLossMode === 'percent' ? longSlPercentPrice : longSlFixedPrice
+  const shortSl =
+    stopLossMode === 'percent' ? shortSlPercentPrice : shortSlFixedPrice
+
+  const activeSl = isLong ? longSl : shortSl
+  const activeSlSignedDiff = isValidPrice ? activeSl - p : 0 // negative for long, positive for short
+  const activeSlLoss =
+    stopLossMode === 'percent'
+      ? isLong
+        ? longSlPercentLoss
+        : shortSlPercentLoss
+      : fixedSlLoss
+
+  const activeSlRateSigned = isLong ? -fixedChangeRateAbs : fixedChangeRateAbs
 
   const totalCost = isValidPrice ? Math.round(p * activeShares) : 0
   const isOverBudget = totalCost > 500000
 
+  // Dynamic Header Title
+  const headerTitle =
+    stopLossMode === 'percent'
+      ? `OCO即算電卓 (${isLong ? '+' : '-'}${tpPercent}% / ${
+          isLong ? '-' : '+'
+        }${slPercent}%)`
+      : `OCO即算電卓 (利確${isLong ? '+' : '-'}${tpPercent}% / 損失-${slFixedYen.toLocaleString()}円)`
+
   const handlePriceChange = (raw: string) => {
     const parsed = parseFloat(raw)
     if (!manualShares && Number.isFinite(parsed) && parsed > 0) {
-      const nextAuto = Math.max(100, Math.floor(budgetYen / parsed / 100) * 100)
+      const nextAuto = Math.max(
+        100,
+        Math.floor(budgetYen / parsed / 100) * 100
+      )
       updateOco({
         priceInput: raw,
         sharesInput: String(nextAuto),
@@ -134,24 +192,22 @@ export const OcoCalculator: React.FC = () => {
 
   return (
     <div className="space-y-4 pb-6">
-      {/* Main Dark OCO Box (Matching her exact dark theme aesthetic & layout!) */}
+      {/* Main Dark OCO Box */}
       <div className="bg-[#1e2433] text-white rounded-3xl p-4 shadow-xl border border-slate-700/80 space-y-3.5">
-        {/* Title & Settings Button */}
-        <div className="flex items-center justify-between">
-          <h2 className="text-base font-extrabold text-[#60a5fa] flex items-center gap-1.5">
-            <Zap className="w-4 h-4 fill-[#60a5fa] text-[#60a5fa]" />
-            OCO即算電卓（{isLong ? '+' : '-'}
-            {tpPercent}% / {isLong ? '-' : '+'}
-            {slPercent}%）
+        {/* 4. ヘッダータイトルの連動 & 設定ボタン */}
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-sm sm:text-base font-extrabold text-[#60a5fa] flex items-center gap-1.5 min-w-0">
+            <Zap className="w-4 h-4 fill-[#60a5fa] text-[#60a5fa] shrink-0" />
+            <span className="truncate">{headerTitle}</span>
           </h2>
 
           <button
             type="button"
             onClick={() => setShowSettings(!showSettings)}
-            className="px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold flex items-center gap-1 border border-slate-600 transition"
+            className="px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold flex items-center gap-1 border border-slate-600 shrink-0 transition"
           >
             <Settings2 className="w-3.5 h-3.5" />
-            %設定
+            設定
           </button>
         </div>
 
@@ -184,7 +240,7 @@ export const OcoCalculator: React.FC = () => {
           </button>
         </div>
 
-        {/* Optional % & Budget Customization Drawer */}
+        {/* Optional % & Fixed Loss & Budget Customization Drawer */}
         {showSettings && (
           <div className="bg-[#0f172a] rounded-2xl p-3.5 border border-slate-700 space-y-3 text-xs">
             <div className="flex items-center justify-between">
@@ -197,17 +253,18 @@ export const OcoCalculator: React.FC = () => {
                   updateOco({
                     tpPercent: 4.0,
                     slPercent: 1.5,
+                    slFixedYen: 5000,
                     budgetYen: 400000,
                     manualShares: false,
                   })
                 }
                 className="text-[11px] text-[#60a5fa] font-bold hover:underline"
               >
-                初期値(+4% / -1.5% / 40万)に戻す
+                初期値(+4% / -1.5% / -5,000円)に戻す
               </button>
             </div>
 
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               <div>
                 <label className="text-[11px] text-emerald-400 font-bold block mb-1">
                   利確幅 (%)
@@ -227,7 +284,7 @@ export const OcoCalculator: React.FC = () => {
               </div>
               <div>
                 <label className="text-[11px] text-rose-400 font-bold block mb-1">
-                  損切幅 (%)
+                  損切比率 (%)
                 </label>
                 <input
                   type="number"
@@ -246,8 +303,28 @@ export const OcoCalculator: React.FC = () => {
                 />
               </div>
               <div>
+                <label className="text-[11px] text-rose-300 font-bold block mb-1">
+                  固定損切枠 (円)
+                </label>
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  step="1000"
+                  value={slFixedYen}
+                  onChange={(e) =>
+                    updateOco({
+                      slFixedYen: Math.max(
+                        500,
+                        parseInt(e.target.value, 10) || 5000
+                      ),
+                    })
+                  }
+                  className="w-full bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-right font-bold text-white"
+                />
+              </div>
+              <div>
                 <label className="text-[11px] text-amber-400 font-bold block mb-1">
-                  1枠目安(万円)
+                  1枠目安 (万円)
                 </label>
                 <input
                   type="number"
@@ -293,7 +370,7 @@ export const OcoCalculator: React.FC = () => {
           </div>
         )}
 
-        {/* Input Row: Entry Price & Shares (Exact layout as her HTML!) */}
+        {/* Input Row: Entry Price & Shares */}
         <div className="grid grid-cols-2 gap-2.5">
           <div>
             <label className="block text-xs text-slate-400 font-bold mb-1">
@@ -313,7 +390,10 @@ export const OcoCalculator: React.FC = () => {
           <div>
             <div className="flex items-center justify-between mb-1">
               <label className="text-xs text-slate-400 font-bold">
-                株数{manualShares ? '（手入力中）' : `（自動${budgetYen / 10000}万枠）`}
+                株数
+                {manualShares
+                  ? '（手入力中）'
+                  : `（自動${budgetYen / 10000}万枠）`}
               </label>
               {manualShares && (
                 <button
@@ -330,7 +410,9 @@ export const OcoCalculator: React.FC = () => {
               type="number"
               inputMode="numeric"
               step="100"
-              value={manualShares ? sharesInput : isValidPrice ? autoShares : ''}
+              value={
+                manualShares ? sharesInput : isValidPrice ? autoShares : ''
+              }
               onFocus={(e) => e.target.select()}
               onChange={(e) => handleSharesChange(e.target.value)}
               placeholder="例: 500"
@@ -348,7 +430,7 @@ export const OcoCalculator: React.FC = () => {
             {[
               { label: '-100株', delta: -100 },
               { label: '+100株', delta: 100 },
-              { label: '自動(40万枠)', reset: true },
+              { label: `自動(${budgetYen / 10000}万枠)`, reset: true },
             ].map((btn) => (
               <button
                 key={btn.label}
@@ -380,18 +462,27 @@ export const OcoCalculator: React.FC = () => {
           <div>
             <div className="text-xs font-extrabold text-[#6ee7b7] flex items-center gap-1.5">
               <span>
-                🎯 利確指値（{isLong ? `+${tpPercent.toFixed(1)}%` : `-${tpPercent.toFixed(1)}% 買戻し`}）
+                🎯 利確指値 (
+                {isLong
+                  ? `+${tpPercent.toFixed(1)}%`
+                  : `-${tpPercent.toFixed(1)}% 買戻し`}
+                )
               </span>
               <Copy className="w-3 h-3 opacity-70" />
             </div>
             <div className="text-xs text-slate-300 mt-1">
               {isValidPrice
-                ? `${isLong ? '買値' : '売値'} ${activeTpDiff >= 0 ? '+' : ''}${activeTpDiff.toFixed(1)}円`
+                ? `${isLong ? '買値' : '売値'} ${
+                    activeTpDiff >= 0 ? '+' : ''
+                  }${activeTpDiff.toFixed(1)}円`
                 : '---'}
             </div>
             <div className="text-[10px] text-emerald-300/70 mt-0.5">
               {isValidPrice
-                ? `理論値: ${(isLong ? p * (1 + tpPercent / 100) : p * (1 - tpPercent / 100)).toFixed(1)}円`
+                ? `理論値: ${(isLong
+                    ? p * (1 + tpPercent / 100)
+                    : p * (1 - tpPercent / 100)
+                  ).toFixed(1)}円`
                 : ''}
             </div>
           </div>
@@ -406,36 +497,84 @@ export const OcoCalculator: React.FC = () => {
           </div>
         </div>
 
-        {/* Card 2: Stop Loss (🛡️ 逆指値損切) */}
-        <div
-          onClick={() => handleCopyPrice(activeSl, '逆指値損切')}
-          className="rounded-2xl p-3.5 bg-red-500/15 border border-red-500 flex items-center justify-between cursor-pointer active:scale-[0.99] transition"
-        >
-          <div>
-            <div className="text-xs font-extrabold text-[#fca5a5] flex items-center gap-1.5">
-              <span>
-                🛡️ 逆指値損切（{isLong ? `-${slPercent.toFixed(1)}%` : `+${slPercent.toFixed(1)}% 買戻し`}）
-              </span>
-              <Copy className="w-3 h-3 opacity-70" />
-            </div>
-            <div className="text-xs text-slate-300 mt-1">
-              {isValidPrice
-                ? `${isLong ? '買値' : '売値'} ${activeSlDiff >= 0 ? '+' : ''}${activeSlDiff.toFixed(1)}円`
-                : '---'}
-            </div>
-            <div className="text-[10px] text-rose-300/70 mt-0.5">
-              {isValidPrice
-                ? `理論値: ${(isLong ? p * (1 - slPercent / 100) : p * (1 + slPercent / 100)).toFixed(1)}円`
-                : ''}
-            </div>
+        {/* 1. 損切モード切替UIの新設 (Segmented Tabs right above Stop Loss Card) */}
+        <div className="space-y-2">
+          <div className="grid grid-cols-2 gap-1.5 bg-[#0f172a] p-1 rounded-xl border border-slate-700">
+            <button
+              type="button"
+              onClick={() => setStopLossMode('percent')}
+              className={`py-2 px-2.5 rounded-lg text-xs font-extrabold transition ${
+                stopLossMode === 'percent'
+                  ? 'bg-rose-500/90 text-white shadow-sm ring-1 ring-rose-400'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              比率で指定 ({isLong ? '-' : '+'}
+              {slPercent}%)
+            </button>
+            <button
+              type="button"
+              onClick={() => setStopLossMode('fixed')}
+              className={`py-2 px-2.5 rounded-lg text-xs font-extrabold transition ${
+                stopLossMode === 'fixed'
+                  ? 'bg-rose-500/90 text-white shadow-sm ring-1 ring-rose-400'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              金額で指定 (-{slFixedYen.toLocaleString()}円)
+            </button>
           </div>
 
-          <div className="text-right">
-            <div className="text-3xl font-extrabold text-[#f87171] tracking-tight">
-              {isValidPrice ? `${activeSl.toLocaleString()} 円` : '--- 円'}
+          {/* 3. 「逆指値損切」カード内の表示連動 */}
+          <div
+            onClick={() => handleCopyPrice(activeSl, '逆指値損切')}
+            className="rounded-2xl p-3.5 bg-red-500/15 border border-red-500 flex items-center justify-between cursor-pointer active:scale-[0.99] transition"
+          >
+            <div>
+              <div className="text-xs font-extrabold text-[#fca5a5] flex items-center gap-1.5">
+                <span>
+                  {stopLossMode === 'percent'
+                    ? `🛡️ 逆指値損切 (${
+                        isLong ? `-${slPercent}%` : `+${slPercent}% 買戻し`
+                      })`
+                    : `🛡️ 逆指値損切 (固定-${slFixedYen.toLocaleString()}円枠)`}
+                </span>
+                <Copy className="w-3 h-3 opacity-70" />
+              </div>
+
+              <div className="text-xs text-slate-300 mt-1">
+                {isValidPrice
+                  ? stopLossMode === 'percent'
+                    ? `${isLong ? '買値' : '売値'} ${
+                        activeSlSignedDiff >= 0 ? '+' : ''
+                      }${activeSlSignedDiff.toFixed(1)}円`
+                    : `${isLong ? '買値' : '売値'} ${
+                        activeSlSignedDiff >= 0 ? '+' : ''
+                      }${activeSlSignedDiff.toFixed(1)}円 (${
+                        activeSlRateSigned >= 0 ? '+' : ''
+                      }${activeSlRateSigned.toFixed(1)}%)`
+                  : '---'}
+              </div>
+
+              <div className="text-[10px] text-rose-300/70 mt-0.5">
+                {isValidPrice
+                  ? stopLossMode === 'percent'
+                    ? `理論値: ${(isLong
+                        ? p * (1 - slPercent / 100)
+                        : p * (1 + slPercent / 100)
+                      ).toFixed(1)}円`
+                    : `1株あたり許容値幅: ${allowedDiffPerShare.toLocaleString()}円 (${activeShares}株)`
+                  : ''}
+              </div>
             </div>
-            <div className="text-xs text-slate-200 font-bold mt-0.5">
-              損失: {isValidPrice ? activeSlLoss.toLocaleString() : 0}円
+
+            <div className="text-right">
+              <div className="text-3xl font-extrabold text-[#f87171] tracking-tight">
+                {isValidPrice ? `${activeSl.toLocaleString()} 円` : '--- 円'}
+              </div>
+              <div className="text-xs text-slate-200 font-bold mt-0.5">
+                損失: {isValidPrice ? activeSlLoss.toLocaleString() : 0}円
+              </div>
             </div>
           </div>
         </div>
@@ -504,7 +643,13 @@ export const OcoCalculator: React.FC = () => {
                   </span>
                 </div>
                 <div className="flex justify-between py-1">
-                  <span className="text-slate-500">🛡️ 損切(-{slPercent}%)</span>
+                  <span className="text-slate-500">
+                    🛡️ 損切(
+                    {stopLossMode === 'percent'
+                      ? `-${slPercent}%`
+                      : `-${slFixedYen.toLocaleString()}円`}
+                    )
+                  </span>
                   <span className="font-extrabold text-rose-600">
                     {longSl.toLocaleString()}円
                   </span>
@@ -535,7 +680,13 @@ export const OcoCalculator: React.FC = () => {
                   </span>
                 </div>
                 <div className="flex justify-between py-1">
-                  <span className="text-slate-500">🛡️ 損切(+{slPercent}%)</span>
+                  <span className="text-slate-500">
+                    🛡️ 損切(
+                    {stopLossMode === 'percent'
+                      ? `+${slPercent}%`
+                      : `-${slFixedYen.toLocaleString()}円`}
+                    )
+                  </span>
                   <span className="font-extrabold text-rose-600">
                     {shortSl.toLocaleString()}円
                   </span>
