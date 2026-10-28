@@ -12,6 +12,7 @@ import {
 } from 'lucide-react'
 import { useStockStore, type StopLossMode } from '../store/useStockStore'
 import { formatNumber, formatYen } from '../utils/format'
+import { VwapChartCard } from './VwapChartCard'
 
 export const OcoCalculator: React.FC = () => {
   const {
@@ -192,6 +193,9 @@ export const OcoCalculator: React.FC = () => {
 
   return (
     <div className="space-y-4 pb-6">
+      {/* Real-time Intraday Price & VWAP Line Chart */}
+      <VwapChartCard />
+
       {/* Main Dark OCO Box */}
       <div className="bg-[#1e2433] text-white rounded-3xl p-4 shadow-xl border border-slate-700/80 space-y-3.5">
         {/* 4. ヘッダータイトルの連動 & 設定ボタン */}

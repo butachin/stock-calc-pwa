@@ -5,16 +5,29 @@ import { VitePWA } from 'vite-plugin-pwa'
 
 // https://vite.dev/config/
 export default defineConfig({
+  server: {
+    proxy: {
+      '/yahoo-api': {
+        target: 'https://query1.finance.yahoo.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/yahoo-api/, ''),
+      },
+    },
+  },
   plugins: [
     react(),
     tailwindcss(),
     VitePWA({
       registerType: 'autoUpdate',
       includeAssets: ['icon.svg'],
+      workbox: {
+        navigateFallbackDenylist: [/^\/api\//, /^\/yahoo-api\//],
+      },
       manifest: {
         name: 'かぶポケ - 株の計算＆NISAシミュレーター',
         short_name: 'かぶポケ',
-        description: 'ナンピン計算・配当利回り＆新NISA比較・積立複利シミュレーションが片手でサクッとできる株ノートアプリ',
+        description:
+          'デイトレOCO即算・リアルタイムVWAPチャート・ナンピン計算・新NISAシミュレーター',
         theme_color: '#10b981',
         background_color: '#f8fafc',
         display: 'standalone',
