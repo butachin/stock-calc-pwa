@@ -123,7 +123,6 @@ function enrichWithVwapAndBollinger(
       weightedSqSum += w * diff * diff
     }
     const vwapVariance = cumVol > 0 ? weightedSqSum / cumVol : 0
-    // Ensure a small minimum visual sigma on index 0 so the band doesn't pinch to zero width at 09:00
     const vwapSigmaRaw = Math.max(
       pt.price * 0.0015,
       Math.sqrt(vwapVariance)
@@ -189,11 +188,10 @@ function enrichWithVwapAndBollinger(
   return result
 }
 
-// Generate realistic deterministic intraday points & cumulative VWAP + Bollinger Bands
+// Generate full Tokyo Stock Exchange trading session: 前場 09:00〜11:30 + 後場 12:30〜15:30 (68 points)
 function generateSimulatedSession(
   basePrice: number,
-  codeSeedStr = '7011',
-  pointsCount = 54
+  codeSeedStr = '7011'
 ): VwapDataPoint[] {
   const rawPoints: RawPoint[] = []
   let currentPrice = basePrice
@@ -203,30 +201,40 @@ function generateSimulatedSession(
       .split('')
       .reduce((acc, ch, idx) => acc + ch.charCodeAt(0) * (idx + 1), 0) || 7011
 
-  const startHour = 9
-  const startMin = 0
+  // Build exact TSE 5-minute time slots from 09:00 to 15:30 (skipping 11:35〜12:25 lunch break)
+  const timeSlots: string[] = []
+  // Morning session (前場): 09:00 -> 11:30
+  for (let m = 9 * 60; m <= 11 * 60 + 30; m += 5) {
+    const hh = String(Math.floor(m / 60)).padStart(2, '0')
+    const mm = String(m % 60).padStart(2, '0')
+    timeSlots.push(`${hh}:${mm}`)
+  }
+  // Afternoon session (後場): 12:30 -> 15:30
+  for (let m = 12 * 60 + 30; m <= 15 * 60 + 30; m += 5) {
+    const hh = String(Math.floor(m / 60)).padStart(2, '0')
+    const mm = String(m % 60).padStart(2, '0')
+    timeSlots.push(`${hh}:${mm}`)
+  }
 
-  for (let i = 0; i < pointsCount; i++) {
-    const totalMins = startMin + i * 5
-    const h = startHour + Math.floor(totalMins / 60)
-    const m = totalMins % 60
-    const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
-
-    const wave = Math.sin((i + (numericSeed % 5)) / 4.5) * (basePrice * 0.005)
+  for (let i = 0; i < timeSlots.length; i++) {
+    const timeStr = timeSlots[i]
+    const wave = Math.sin((i + (numericSeed % 5)) / 5.5) * (basePrice * 0.005)
     const n = (seededNoise(numericSeed, i) - 0.47) * (basePrice * 0.004)
     currentPrice = Math.max(
       10,
       Math.round(basePrice + wave + n * Math.sqrt(i + 1))
     )
 
+    const isOpeningOrClosing = i < 4 || i > timeSlots.length - 5
     const vol =
       Math.round(
-        (300 + seededNoise(numericSeed + 7, i) * 900) * (i < 4 ? 2.0 : 1)
+        (300 + seededNoise(numericSeed + 7, i) * 900) *
+          (isOpeningOrClosing ? 2.0 : 1)
       ) * 100
 
     rawPoints.push({
       time: timeStr,
-      timestamp: Date.now() - (pointsCount - i) * 60000,
+      timestamp: Date.now() - (timeSlots.length - i) * 300000,
       price: currentPrice,
       typicalPrice: currentPrice,
       volume: vol,
@@ -253,7 +261,9 @@ export const VwapChartCard: React.FC = () => {
   const [show3Sigma, setShow3Sigma] = useState<boolean>(false)
 
   // Horizontal Click-and-Drag Pan & Zoom state
-  const [zoom, setZoom] = useState<number>(1.8)
+  // Default zoom = 1.0 so the entire 09:00〜15:30 day is visible immediately without cutting off at 13:25,
+  // while still allowing free horizontal click-and-drag panning!
+  const [zoom, setZoom] = useState<number>(1.0)
   const [panX, setPanX] = useState<number>(0)
   const [isDragging, setIsDragging] = useState<boolean>(false)
   const [viewportWidth, setViewportWidth] = useState<number>(340)
@@ -279,7 +289,8 @@ export const VwapChartCard: React.FC = () => {
   }, [])
 
   const canvasWidth = Math.max(viewportWidth, Math.round(viewportWidth * zoom))
-  const overscrollMargin = Math.round(viewportWidth * 0.25)
+  // Allow generous horizontal drag (45% of viewport width left/right) even at 1.0x zoom!
+  const overscrollMargin = Math.round(viewportWidth * 0.45)
   const minPanX = -(canvasWidth - viewportWidth) - overscrollMargin
   const maxPanX = overscrollMargin
 
@@ -451,60 +462,70 @@ export const VwapChartCard: React.FC = () => {
 
       try {
         // 1. Try Vercel Serverless Function `/api/chart`
-        const apiRes = await fetch(
-          `/api/chart?symbol=${encodeURIComponent(
-            yahooSym
-          )}&interval=${intervalToFetch}&range=1d`
-        )
-        if (apiRes.ok) {
-          const json = await apiRes.json()
-          const parsed = parseYahooChartAndComputeVwap(json.data)
-          if (parsed && parsed.points.length > 0) {
-            setChartData(parsed.points)
-            setPrevClose(parsed.previousClose)
-            setPanX(0)
-            const nowStr = new Date().toLocaleTimeString('ja-JP', {
-              hour: '2-digit',
-              minute: '2-digit',
-            })
-            setDataSourceLabel(`東証データ (${nowStr}取得・自動更新OFF)`)
-            setIsLoading(false)
-            return
+        try {
+          const apiRes = await fetch(
+            `/api/chart?symbol=${encodeURIComponent(
+              yahooSym
+            )}&interval=${intervalToFetch}&range=1d`
+          )
+          const contentType = apiRes.headers.get('content-type') || ''
+          if (apiRes.ok && contentType.includes('application/json')) {
+            const json = await apiRes.json()
+            const parsed = parseYahooChartAndComputeVwap(json.data)
+            if (parsed && parsed.points.length > 0) {
+              setChartData(parsed.points)
+              setPrevClose(parsed.previousClose)
+              setPanX(0)
+              const lastTime =
+                parsed.points[parsed.points.length - 1]?.time || ''
+              setDataSourceLabel(
+                `東証データ (09:00〜${lastTime}・自動更新OFF)`
+              )
+              setIsLoading(false)
+              return
+            }
           }
+        } catch {
+          // Proceed to Step 2
         }
 
         // 2. Try local Vite dev server proxy `/yahoo-api`
-        const viteProxyRes = await fetch(
-          `/yahoo-api/v8/finance/chart/${encodeURIComponent(
-            yahooSym
-          )}?interval=${intervalToFetch}&range=1d&includePrePost=false`
-        )
-        if (viteProxyRes.ok) {
-          const rawData = await viteProxyRes.json()
-          const parsed = parseYahooChartAndComputeVwap(rawData)
-          if (parsed && parsed.points.length > 0) {
-            setChartData(parsed.points)
-            setPrevClose(parsed.previousClose)
-            setPanX(0)
-            const nowStr = new Date().toLocaleTimeString('ja-JP', {
-              hour: '2-digit',
-              minute: '2-digit',
-            })
-            setDataSourceLabel(`東証データ (${nowStr}取得・自動更新OFF)`)
-            setIsLoading(false)
-            return
+        try {
+          const viteProxyRes = await fetch(
+            `/yahoo-api/v8/finance/chart/${encodeURIComponent(
+              yahooSym
+            )}?interval=${intervalToFetch}&range=1d&includePrePost=false`
+          )
+          const contentType = viteProxyRes.headers.get('content-type') || ''
+          if (viteProxyRes.ok && contentType.includes('application/json')) {
+            const rawData = await viteProxyRes.json()
+            const parsed = parseYahooChartAndComputeVwap(rawData)
+            if (parsed && parsed.points.length > 0) {
+              setChartData(parsed.points)
+              setPrevClose(parsed.previousClose)
+              setPanX(0)
+              const lastTime =
+                parsed.points[parsed.points.length - 1]?.time || ''
+              setDataSourceLabel(
+                `東証データ (09:00〜${lastTime}・自動更新OFF)`
+              )
+              setIsLoading(false)
+              return
+            }
           }
+        } catch {
+          // Proceed to fallback
         }
 
         throw new Error('Fallback to simulated intraday data')
       } catch {
         const matched = tickerListRef.current.find((t) => t.code === cleanCode)
         const base = matched?.basePrice || 2000
-        const sim = generateSimulatedSession(base, cleanCode, 54)
+        const sim = generateSimulatedSession(base, cleanCode)
         setChartData(sim)
         setPrevClose(base)
         setPanX(0)
-        setDataSourceLabel('シミュレーション波形（自動更新OFF）')
+        setDataSourceLabel('09:00〜15:30 全日波形（自動更新OFF）')
       } finally {
         setIsLoading(false)
       }
@@ -867,7 +888,7 @@ export const VwapChartCard: React.FC = () => {
         <div className="flex items-center justify-between text-xs flex-wrap gap-2">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-bold text-slate-200">
-              {selectedCode} {selectedName}
+              {selectedCode} {selectedName}（09:00〜15:30）
             </span>
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-sky-500/15 text-sky-300 border border-sky-500/30">
               <MoveHorizontal className="w-3 h-3" />
@@ -898,7 +919,7 @@ export const VwapChartCard: React.FC = () => {
                     : 'text-slate-400 hover:text-white'
                 }`}
               >
-                全体
+                全体(9:00-15:30)
               </button>
               <button
                 type="button"
@@ -909,7 +930,7 @@ export const VwapChartCard: React.FC = () => {
                     : 'text-slate-400 hover:text-white'
                 }`}
               >
-                1.8x
+                1.8x拡大
               </button>
               <button
                 type="button"
@@ -920,7 +941,7 @@ export const VwapChartCard: React.FC = () => {
                     : 'text-slate-400 hover:text-white'
                 }`}
               >
-                3.0x
+                3.0x拡大
               </button>
               <button
                 type="button"
@@ -1023,7 +1044,7 @@ export const VwapChartCard: React.FC = () => {
                       tick={{ fontSize: 10, fill: '#94a3b8' }}
                       axisLine={false}
                       tickLine={false}
-                      minTickGap={20}
+                      minTickGap={22}
                     />
                     <YAxis domain={yDomain} ticks={yTicks} hide />
                     <Tooltip

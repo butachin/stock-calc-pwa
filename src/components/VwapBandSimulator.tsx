@@ -240,7 +240,9 @@ export const VwapBandSimulator: React.FC = () => {
     useState<boolean>(true)
 
   // Horizontal Click-and-Drag Pan & Zoom state
-  const [zoom, setZoom] = useState<number>(1.6)
+  // Default zoom = 1.0 so the entire 09:00〜15:30 day is visible immediately without cutting off at 13:15/13:25,
+  // while still allowing free horizontal click-and-drag panning!
+  const [zoom, setZoom] = useState<number>(1.0)
   const [panX, setPanX] = useState<number>(0)
   const [isDragging, setIsDragging] = useState<boolean>(false)
   const [viewportWidth, setViewportWidth] = useState<number>(340)
@@ -268,7 +270,7 @@ export const VwapBandSimulator: React.FC = () => {
   }, [viewMode])
 
   const canvasWidth = Math.max(viewportWidth, Math.round(viewportWidth * zoom))
-  const overscrollMargin = Math.round(viewportWidth * 0.25)
+  const overscrollMargin = Math.round(viewportWidth * 0.45)
   const minPanX = -(canvasWidth - viewportWidth) - overscrollMargin
   const maxPanX = overscrollMargin
 
@@ -524,7 +526,7 @@ export const VwapBandSimulator: React.FC = () => {
               onClick={() => {
                 setVolumeMultiplier(2.0)
                 setVolatilityMultiplier(1.0)
-                setZoom(1.6)
+                setZoom(1.0)
                 setPanX(0)
               }}
               className="px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-bold flex items-center gap-1 border border-slate-600 shrink-0 transition"
