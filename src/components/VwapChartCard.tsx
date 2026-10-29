@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Brush,
   CartesianGrid,
   Line,
   LineChart,
@@ -14,15 +13,12 @@ import {
   Activity,
   ArrowDownRight,
   ArrowUpRight,
-  ChevronLeft,
-  ChevronRight,
-  Hand,
-  Plus,
+  MoveHorizontal,
   RefreshCw,
   Search,
-  TrendingDown,
-  TrendingUp,
   Zap,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react'
 import { useStockStore } from '../store/useStockStore'
 import { formatNumber } from '../utils/format'
@@ -53,35 +49,20 @@ const POPULAR_DAYTRADE_TICKERS: PresetTicker[] = [
   { code: '9432', name: 'NTT', basePrice: 155 },
 ]
 
-// Helper: deterministic pseudo-random generator seeded by stock code so the chart NEVER jumps randomly
+const clamp = (val: number, min: number, max: number) =>
+  Math.max(min, Math.min(max, val))
+
+// Deterministic pseudo-random generator seeded by stock code so the chart NEVER jumps randomly
 function seededNoise(seed: number, step: number): number {
   const x = Math.sin(seed * 9301 + step * 49297 + 233280) * 10000
   return x - Math.floor(x)
 }
 
-// Recompute cumulative VWAP for a series of points after manual edits
-function recomputeVwapSeries(points: VwapDataPoint[]): VwapDataPoint[] {
-  let cumPV = 0
-  let cumVol = 0
-  return points.map((pt) => {
-    const vol = Math.max(100, pt.volume || 1000)
-    cumPV += pt.price * vol
-    cumVol += vol
-    const vwap = Math.round((cumPV / cumVol) * 10) / 10
-    return {
-      ...pt,
-      volume: vol,
-      cumVolume: cumVol,
-      vwap,
-    }
-  })
-}
-
-// Helper to generate realistic deterministic intraday points & cumulative VWAP
+// Generate realistic deterministic intraday points & cumulative VWAP
 function generateSimulatedSession(
   basePrice: number,
   codeSeedStr = '7011',
-  pointsCount = 36
+  pointsCount = 54
 ): VwapDataPoint[] {
   const result: VwapDataPoint[] = []
   let currentPrice = basePrice
@@ -137,14 +118,91 @@ export const VwapChartCard: React.FC = () => {
   const [codeInput, setCodeInput] = useState('7011')
   const [interval, setIntervalType] = useState<'1m' | '5m'>('5m')
   const [isLoading, setIsLoading] = useState(false)
-  const [dataSourceLabel, setDataSourceLabel] = useState<string>('手動操作モード（自動更新停止中）')
+  const [dataSourceLabel, setDataSourceLabel] = useState<string>('自動更新OFF')
   const [prevClose, setPrevClose] = useState<number | null>(null)
-  const [allChartData, setAllChartData] = useState<VwapDataPoint[]>([])
-  const [visibleCount, setVisibleCount] = useState<number>(36)
-  const [showZoomBrush, setShowZoomBrush] = useState<boolean>(false)
+  const [chartData, setChartData] = useState<VwapDataPoint[]>([])
 
-  const cumPVRef = useRef(0)
-  const cumVolRef = useRef(0)
+  // Horizontal Click-and-Drag Pan & Zoom state
+  const [zoom, setZoom] = useState<number>(1.8)
+  const [panX, setPanX] = useState<number>(0)
+  const [isDragging, setIsDragging] = useState<boolean>(false)
+  const [viewportWidth, setViewportWidth] = useState<number>(340)
+
+  const viewportRef = useRef<HTMLDivElement | null>(null)
+  const dragStartRef = useRef<{ clientX: number; startPanX: number } | null>(
+    null
+  )
+
+  // Measure viewport width for responsive horizontal panning bounds
+  useEffect(() => {
+    const el = viewportRef.current
+    if (!el) return
+    const updateWidth = () => {
+      if (el.clientWidth > 0) {
+        setViewportWidth(el.clientWidth)
+      }
+    }
+    updateWidth()
+    const ro = new ResizeObserver(updateWidth)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  const canvasWidth = Math.max(viewportWidth, Math.round(viewportWidth * zoom))
+  const overscrollMargin = Math.round(viewportWidth * 0.25)
+  const minPanX = -(canvasWidth - viewportWidth) - overscrollMargin
+  const maxPanX = overscrollMargin
+
+  const handleChangeZoom = (nextZoom: number) => {
+    const clampedZoom = clamp(Number(nextZoom.toFixed(2)), 1.0, 4.0)
+    const prevCanvasW = Math.max(viewportWidth, viewportWidth * zoom)
+    const nextCanvasW = Math.max(viewportWidth, viewportWidth * clampedZoom)
+    const centerRatio = (viewportWidth / 2 - panX) / prevCanvasW
+    const nextPan = Math.round(viewportWidth / 2 - centerRatio * nextCanvasW)
+    const nextMinPan = -(nextCanvasW - viewportWidth) - overscrollMargin
+    setZoom(clampedZoom)
+    setPanX(clamp(nextPan, nextMinPan, maxPanX))
+  }
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 && e.pointerType === 'mouse') return
+    e.currentTarget.setPointerCapture(e.pointerId)
+    dragStartRef.current = {
+      clientX: e.clientX,
+      startPanX: panX,
+    }
+    setIsDragging(true)
+  }
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragStartRef.current) return
+    const deltaX = e.clientX - dragStartRef.current.clientX
+    const nextPan = clamp(
+      dragStartRef.current.startPanX + deltaX,
+      minPanX,
+      maxPanX
+    )
+    setPanX(nextPan)
+  }
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (dragStartRef.current) {
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId)
+      } catch {
+        // Ignore
+      }
+    }
+    dragStartRef.current = null
+    setIsDragging(false)
+  }
+
+  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY) && Math.abs(e.deltaX) > 1) {
+      e.preventDefault()
+      setPanX((prev) => clamp(prev - e.deltaX, minPanX, maxPanX))
+    }
+  }
 
   // Merge user's saved stocks (that have a ticker code) with popular daytrade tickers
   const tickerList = useMemo(() => {
@@ -251,9 +309,6 @@ export const VwapChartCard: React.FC = () => {
         })
       }
 
-      cumPVRef.current = cumPV
-      cumVolRef.current = cumVol
-
       return {
         points,
         previousClose:
@@ -286,9 +341,9 @@ export const VwapChartCard: React.FC = () => {
           const json = await apiRes.json()
           const parsed = parseYahooChartAndComputeVwap(json.data)
           if (parsed && parsed.points.length > 0) {
-            setAllChartData(parsed.points)
-            setVisibleCount(parsed.points.length)
+            setChartData(parsed.points)
             setPrevClose(parsed.previousClose)
+            setPanX(0)
             const nowStr = new Date().toLocaleTimeString('ja-JP', {
               hour: '2-digit',
               minute: '2-digit',
@@ -309,9 +364,9 @@ export const VwapChartCard: React.FC = () => {
           const rawData = await viteProxyRes.json()
           const parsed = parseYahooChartAndComputeVwap(rawData)
           if (parsed && parsed.points.length > 0) {
-            setAllChartData(parsed.points)
-            setVisibleCount(parsed.points.length)
+            setChartData(parsed.points)
             setPrevClose(parsed.previousClose)
+            setPanX(0)
             const nowStr = new Date().toLocaleTimeString('ja-JP', {
               hour: '2-digit',
               minute: '2-digit',
@@ -326,11 +381,11 @@ export const VwapChartCard: React.FC = () => {
       } catch {
         const matched = tickerListRef.current.find((t) => t.code === cleanCode)
         const base = matched?.basePrice || 2000
-        const sim = generateSimulatedSession(base, cleanCode, 36)
-        setAllChartData(sim)
-        setVisibleCount(sim.length)
+        const sim = generateSimulatedSession(base, cleanCode, 54)
+        setChartData(sim)
         setPrevClose(base)
-        setDataSourceLabel('手動操作チャート（自動更新OFF）')
+        setPanX(0)
+        setDataSourceLabel('シミュレーション波形（自動更新OFF）')
       } finally {
         setIsLoading(false)
       }
@@ -338,16 +393,9 @@ export const VwapChartCard: React.FC = () => {
     []
   )
 
-  // Initial & symbol/interval change fetch ONLY (no automatic background polling!)
   useEffect(() => {
     void fetchIntradayData(selectedCode, interval)
   }, [selectedCode, interval, fetchIntradayData])
-
-  // Sliced chart data according to the manual time-seek slider (`visibleCount`)
-  const chartData = useMemo(
-    () => allChartData.slice(0, Math.max(2, visibleCount)),
-    [allChartData, visibleCount]
-  )
 
   const latestPoint =
     chartData.length > 0 ? chartData[chartData.length - 1] : null
@@ -358,54 +406,14 @@ export const VwapChartCard: React.FC = () => {
     currentVwap > 0 ? (vwapDiff / currentVwap) * 100 : 0
   const isAboveVwap = vwapDiff >= 0
 
-  const priceStep = useMemo(() => {
-    if (currentPrice >= 10000) return 50
-    if (currentPrice >= 3000) return 15
-    if (currentPrice >= 500) return 5
-    return 1
-  }, [currentPrice])
-
-  // Manually adjust the currently displayed latest bar's price
-  const handleAdjustCurrentPrice = (newPrice: number) => {
-    const targetIdx = Math.max(0, chartData.length - 1)
-    setAllChartData((prev) => {
-      if (prev.length === 0) return prev
-      const copy = [...prev]
-      copy[targetIdx] = {
-        ...copy[targetIdx],
-        price: Math.max(1, Math.round(newPrice)),
+  // Compute 5 evenly spaced Y-axis ticks so the pinned left Y-axis and horizontal grid lines align 100%
+  const { yDomain, yTicks } = useMemo(() => {
+    if (chartData.length === 0) {
+      return {
+        yDomain: [1900, 2100] as [number, number],
+        yTicks: [2100, 2050, 2000, 1950, 1900],
       }
-      return recomputeVwapSeries(copy)
-    })
-    setDataSourceLabel('✍️ 手動調整中（自動更新OFF）')
-  }
-
-  // Manually append a new bar (+上昇足 / 横ばい足 / -下落足)
-  const handleAppendCustomBar = (deltaSteps: number, volMultiplier = 1.5) => {
-    setAllChartData((prev) => {
-      const activeSlice = prev.slice(0, Math.max(2, visibleCount))
-      const last = activeSlice[activeSlice.length - 1]
-      if (!last) return prev
-      const nextPrice = Math.max(1, Math.round(last.price + deltaSteps * priceStep))
-      const nextVol = Math.round((last.volume || 50000) * volMultiplier)
-      const nextPoint: VwapDataPoint = {
-        time: `手動+${activeSlice.length + 1}`,
-        timestamp: Date.now(),
-        price: nextPrice,
-        vwap: last.vwap,
-        volume: nextVol,
-        cumVolume: last.cumVolume + nextVol,
-      }
-      const updated = recomputeVwapSeries([...activeSlice, nextPoint])
-      setVisibleCount(updated.length)
-      return updated
-    })
-    setDataSourceLabel('✍️ 手動調整中（自動更新OFF）')
-  }
-
-  // Compute chart Y-axis domain with padding so price and VWAP lines are clearly visible
-  const yDomain = useMemo(() => {
-    if (chartData.length === 0) return ['auto', 'auto']
+    }
     let minVal = Infinity
     let maxVal = -Infinity
     for (const pt of chartData) {
@@ -419,8 +427,29 @@ export const VwapChartCard: React.FC = () => {
       maxVal = Math.max(maxVal, prevClose)
     }
     const pad = Math.max(2, Math.round((maxVal - minVal) * 0.12))
-    return [Math.floor(minVal - pad), Math.ceil(maxVal + pad)]
+    const rawMin = Math.floor(minVal - pad)
+    const rawMax = Math.ceil(maxVal + pad)
+    const step = Math.max(1, Math.ceil((rawMax - rawMin) / 4))
+    const finalMax = rawMin + step * 4
+    return {
+      yDomain: [rawMin, finalMax] as [number, number],
+      yTicks: [
+        finalMax,
+        rawMin + step * 3,
+        rawMin + step * 2,
+        rawMin + step,
+        rawMin,
+      ],
+    }
   }, [chartData, prevClose])
+
+  const totalPanRange = Math.max(1, maxPanX - minPanX)
+  const thumbWidthPct = clamp((viewportWidth / canvasWidth) * 100, 18, 90)
+  const thumbLeftPct = clamp(
+    ((maxPanX - panX) / totalPanRange) * (100 - thumbWidthPct),
+    0,
+    100 - thumbWidthPct
+  )
 
   const handleSelectTicker = (ticker: PresetTicker) => {
     setSelectedCode(ticker.code)
@@ -457,7 +486,7 @@ export const VwapChartCard: React.FC = () => {
 
   return (
     <div className="bg-[#1e2433] text-white rounded-3xl p-4 shadow-xl border border-slate-700/80 space-y-3.5">
-      {/* Top Header: Title + Static Status + Interval + Manual Refresh */}
+      {/* Top Header */}
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-2 flex-wrap">
           <div className="flex items-center gap-1.5">
@@ -472,7 +501,7 @@ export const VwapChartCard: React.FC = () => {
           </span>
         </div>
 
-        {/* 1m / 5m + Manual Refresh Button */}
+        {/* 1m / 5m + Manual Refresh */}
         <div className="flex items-center gap-1.5">
           <div className="bg-[#0f172a] p-0.5 rounded-lg border border-slate-700 flex text-[11px] font-bold">
             <button
@@ -503,17 +532,16 @@ export const VwapChartCard: React.FC = () => {
             type="button"
             onClick={() => void fetchIntradayData(selectedCode, interval)}
             className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 text-[11px] font-bold flex items-center gap-1 active:scale-95 transition"
-            title="ボタンを押した時だけ最新データを取得します（勝手に動きません）"
           >
             <RefreshCw
               className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`}
             />
-            手動で再取得
+            再取得
           </button>
         </div>
       </div>
 
-      {/* Stock Picker Row: Quick Preset Chips + 4-digit Code Search */}
+      {/* Stock Picker Row */}
       <div className="space-y-2">
         <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
           {tickerList.map((ticker) => {
@@ -558,132 +586,12 @@ export const VwapChartCard: React.FC = () => {
         </form>
       </div>
 
-      {/* Manual Chart Manipulation Panel: Time Scrubbing & Direct Price Control */}
-      <div className="bg-[#0f172a] rounded-2xl p-3 border border-slate-700/90 space-y-3">
-        {/* 1. Time Seek Slider */}
-        <div className="space-y-1.5 pb-2.5 border-b border-slate-800">
-          <div className="flex items-center justify-between text-xs">
-            <span className="font-extrabold text-amber-300 flex items-center gap-1">
-              ⏱️ チャートの時間を自分で動かす（コマ送り・巻き戻し）
-            </span>
-            <span className="font-mono text-[11px] font-bold text-slate-300 bg-slate-800 px-2 py-0.5 rounded-md border border-slate-700">
-              {latestPoint?.time || '--:--'} 時点 ({chartData.length}/
-              {allChartData.length}本)
-            </span>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              disabled={visibleCount <= 2}
-              onClick={() => setVisibleCount((v) => Math.max(2, v - 1))}
-              className="px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-35 text-xs font-bold flex items-center gap-0.5 border border-slate-600 shrink-0"
-            >
-              <ChevronLeft className="w-3.5 h-3.5" />
-              戻す
-            </button>
-            <input
-              type="range"
-              min={2}
-              max={Math.max(2, allChartData.length)}
-              step={1}
-              value={visibleCount}
-              onChange={(e) => setVisibleCount(parseInt(e.target.value, 10))}
-              className="flex-1 accent-amber-400 cursor-pointer"
-            />
-            <button
-              type="button"
-              disabled={visibleCount >= allChartData.length}
-              onClick={() =>
-                setVisibleCount((v) => Math.min(allChartData.length, v + 1))
-              }
-              className="px-2.5 py-1 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-35 text-xs font-extrabold flex items-center gap-0.5 text-white shrink-0"
-            >
-              進める
-              <ChevronRight className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        </div>
-
-        {/* 2. Direct Price Adjustment & Bar Appending */}
-        <div className="space-y-2">
-          <div className="flex items-center justify-between flex-wrap gap-1.5">
-            <span className="text-xs font-extrabold text-sky-300 flex items-center gap-1">
-              <Hand className="w-3.5 h-3.5" />
-              現在足の株価を自分で動かす（{latestPoint?.time || '最新'}）
-            </span>
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onClick={() => handleAdjustCurrentPrice(currentPrice - priceStep)}
-                className="px-2 py-0.5 rounded-lg bg-rose-500/20 text-rose-300 border border-rose-500/40 text-xs font-extrabold active:scale-95"
-              >
-                -{priceStep}円
-              </button>
-              <span className="font-mono text-xs font-extrabold text-white px-1.5">
-                {Math.round(currentPrice).toLocaleString()}円
-              </span>
-              <button
-                type="button"
-                onClick={() => handleAdjustCurrentPrice(currentPrice + priceStep)}
-                className="px-2 py-0.5 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-xs font-extrabold active:scale-95"
-              >
-                +{priceStep}円
-              </button>
-            </div>
-          </div>
-
-          <input
-            type="range"
-            min={Math.max(10, Math.round(currentPrice * 0.9))}
-            max={Math.max(100, Math.round(currentPrice * 1.1))}
-            step={priceStep}
-            value={Math.round(currentPrice)}
-            onChange={(e) =>
-              handleAdjustCurrentPrice(parseInt(e.target.value, 10))
-            }
-            className="w-full accent-[#38bdf8] cursor-pointer"
-          />
-
-          <div className="flex items-center justify-between gap-1.5 pt-1 flex-wrap">
-            <span className="text-[11px] text-slate-400 font-bold">
-              ✍️ 次の足を自分で描き足す：
-            </span>
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => handleAppendCustomBar(2, 1.8)}
-                className="px-2.5 py-1 rounded-lg bg-emerald-600/30 hover:bg-emerald-600/40 text-emerald-300 border border-emerald-500/50 text-[11px] font-extrabold flex items-center gap-1 active:scale-95 transition"
-              >
-                <TrendingUp className="w-3 h-3" />
-                +上昇足
-              </button>
-              <button
-                type="button"
-                onClick={() => handleAppendCustomBar(0, 1.0)}
-                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-600 text-[11px] font-bold flex items-center gap-1 active:scale-95 transition"
-              >
-                <Plus className="w-3 h-3" />
-                横ばい足
-              </button>
-              <button
-                type="button"
-                onClick={() => handleAppendCustomBar(-2, 1.8)}
-                className="px-2.5 py-1 rounded-lg bg-rose-600/30 hover:bg-rose-600/40 text-rose-300 border border-rose-500/50 text-[11px] font-extrabold flex items-center gap-1 active:scale-95 transition"
-              >
-                <TrendingDown className="w-3 h-3" />
-                -下落足
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
       {/* Current Price vs VWAP Summary Banner */}
       <div className="grid grid-cols-3 gap-2 bg-[#0f172a] rounded-2xl p-3 border border-slate-700/90 items-center">
         <div>
           <div className="text-[11px] text-slate-400 font-bold flex items-center gap-1">
             <span className="w-2 h-2 rounded-full bg-[#38bdf8] inline-block" />
-            選択時点の株価
+            現在株価 ({selectedCode})
           </div>
           <div className="text-xl sm:text-2xl font-extrabold text-[#38bdf8] tracking-tight mt-0.5">
             {currentPrice > 0 ? `${formatNumber(currentPrice, 1)}円` : '---'}
@@ -730,138 +638,245 @@ export const VwapChartCard: React.FC = () => {
         </div>
       </div>
 
-      {/* Line Chart: Price + VWAP */}
-      <div className="bg-[#0f172a] rounded-2xl p-3 border border-slate-700/80">
-        <div className="flex items-center justify-between text-xs mb-2 flex-wrap gap-2">
-          <span className="font-bold text-slate-300">
-            {selectedCode} {selectedName}（株価 ＆ VWAP 推移）
-          </span>
-          <div className="flex items-center gap-2.5 text-[11px] font-bold">
-            <button
-              type="button"
-              onClick={() => setShowZoomBrush(!showZoomBrush)}
-              className={`px-2 py-0.5 rounded-md text-[10px] font-bold border transition ${
-                showZoomBrush
-                  ? 'bg-blue-600 text-white border-blue-400'
-                  : 'bg-slate-900 text-slate-400 border-slate-700'
-              }`}
-            >
-              🔍 ズームバー {showZoomBrush ? 'ON' : 'OFF'}
-            </button>
-            <span className="flex items-center gap-1 text-[#38bdf8]">
-              <span className="w-3 h-0.5 bg-[#38bdf8] inline-block" />
-              株価
+      {/* Click-and-Drag Pannable Line Chart: Price + VWAP */}
+      <div className="bg-[#0f172a] rounded-2xl p-3 border border-slate-700/80 space-y-2">
+        <div className="flex items-center justify-between text-xs flex-wrap gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-bold text-slate-200">
+              {selectedCode} {selectedName}
             </span>
-            <span className="flex items-center gap-1 text-[#f59e0b]">
-              <span className="w-3 h-0.5 bg-[#f59e0b] inline-block" />
-              VWAP
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-sky-500/15 text-sky-300 border border-sky-500/30">
+              <MoveHorizontal className="w-3 h-3" />
+              クリック＆ドラッグで左右移動
             </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {/* Zoom Controls */}
+            <div className="inline-flex items-center bg-slate-900 rounded-lg p-0.5 border border-slate-700 text-[10px] font-bold">
+              <button
+                type="button"
+                onClick={() => handleChangeZoom(zoom - 0.4)}
+                className="p-1 text-slate-300 hover:text-white active:scale-95"
+                title="縮小"
+              >
+                <ZoomOut className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setZoom(1.0)
+                  setPanX(0)
+                }}
+                className={`px-1.5 py-0.5 rounded ${
+                  zoom === 1.0
+                    ? 'bg-blue-600 text-white'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                全体
+              </button>
+              <button
+                type="button"
+                onClick={() => handleChangeZoom(1.8)}
+                className={`px-1.5 py-0.5 rounded ${
+                  Math.abs(zoom - 1.8) < 0.2
+                    ? 'bg-blue-600 text-white'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                1.8x
+              </button>
+              <button
+                type="button"
+                onClick={() => handleChangeZoom(3.0)}
+                className={`px-1.5 py-0.5 rounded ${
+                  zoom >= 2.6
+                    ? 'bg-blue-600 text-white'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                3.0x
+              </button>
+              <button
+                type="button"
+                onClick={() => handleChangeZoom(zoom + 0.4)}
+                className="p-1 text-slate-300 hover:text-white active:scale-95"
+                title="拡大"
+              >
+                <ZoomIn className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
         </div>
 
-        <div className="h-56 w-full">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart
-              data={chartData}
-              margin={{ top: 6, right: 8, left: -12, bottom: 0 }}
+        {/* Legend */}
+        <div className="flex items-center gap-3 text-[11px] font-bold">
+          <span className="flex items-center gap-1 text-[#38bdf8]">
+            <span className="w-3 h-0.5 bg-[#38bdf8] inline-block" />
+            株価
+          </span>
+          <span className="flex items-center gap-1 text-[#f59e0b]">
+            <span className="w-3 h-0.5 bg-[#f59e0b] inline-block" />
+            VWAP
+          </span>
+          {prevClose && (
+            <span className="flex items-center gap-1 text-slate-400">
+              <span className="w-2.5 h-0.5 border-b border-dashed border-slate-400 inline-block" />
+              前日終値
+            </span>
+          )}
+        </div>
+
+        {/* Interactive Click-and-Drag Chart Box */}
+        <div className="relative rounded-xl border border-slate-800 bg-[#0b1120] overflow-hidden">
+          <div className="flex">
+            {/* Pinned Left Y-Axis Column */}
+            <div className="w-12 shrink-0 border-r border-slate-800/90 bg-[#0f172a]/95 z-10 select-none">
+              <div className="h-56 pt-[8px] pb-[22px] px-1.5 flex flex-col justify-between items-end text-[10px] font-mono text-slate-400">
+                {yTicks.map((t) => (
+                  <span key={t} className="leading-none">
+                    {t}
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            {/* Horizontally Draggable Plot Area */}
+            <div
+              ref={viewportRef}
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerUp}
+              onWheel={handleWheel}
+              className={`flex-1 overflow-hidden select-none touch-pan-y ${
+                isDragging ? 'cursor-grabbing' : 'cursor-grab'
+              }`}
             >
-              <CartesianGrid
-                strokeDasharray="3 3"
-                stroke="#1e293b"
-                vertical={false}
-              />
-              <XAxis
-                dataKey="time"
-                tick={{ fontSize: 10, fill: '#94a3b8' }}
-                axisLine={false}
-                tickLine={false}
-                minTickGap={24}
-              />
-              <YAxis
-                domain={yDomain}
-                tick={{ fontSize: 10, fill: '#94a3b8' }}
-                axisLine={false}
-                tickLine={false}
-                tickFormatter={(v) => `${v}`}
-              />
-              <Tooltip
-                content={({ active, payload }) => {
-                  if (!active || !payload || !payload.length) return null
-                  const pt = payload[0].payload as VwapDataPoint
-                  const diff = pt.price - pt.vwap
-                  const diffPct = pt.vwap > 0 ? (diff / pt.vwap) * 100 : 0
-                  return (
-                    <div className="bg-slate-900/95 border border-slate-600 rounded-xl p-2.5 text-xs shadow-xl space-y-1">
-                      <div className="font-bold text-slate-300 border-b border-slate-700 pb-1">
-                        ⏰ {pt.time} 時点
-                      </div>
-                      <div className="flex items-center justify-between gap-4">
-                        <span className="text-[#38bdf8] font-bold">株価：</span>
-                        <span className="font-extrabold text-white">
-                          {pt.price.toLocaleString()} 円
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between gap-4">
-                        <span className="text-[#f59e0b] font-bold">VWAP：</span>
-                        <span className="font-extrabold text-[#f59e0b]">
-                          {pt.vwap.toLocaleString()} 円
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between gap-4">
-                        <span className="text-slate-400">VWAP乖離：</span>
-                        <span
-                          className={`font-bold ${
-                            diff >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                          }`}
-                        >
-                          {diff >= 0 ? '+' : ''}
-                          {diff.toFixed(1)}円 ({diffPct >= 0 ? '+' : ''}
-                          {diffPct.toFixed(2)}%)
-                        </span>
-                      </div>
-                    </div>
-                  )
+              <div
+                style={{
+                  width: `${canvasWidth}px`,
+                  transform: `translate3d(${panX}px, 0, 0)`,
                 }}
-              />
-              {prevClose && (
-                <ReferenceLine
-                  y={prevClose}
-                  stroke="#64748b"
-                  strokeDasharray="4 4"
-                  strokeWidth={1}
-                />
-              )}
-              {/* VWAP Line (Gold/Amber) */}
-              <Line
-                type="monotone"
-                dataKey="vwap"
-                name="VWAP"
-                stroke="#f59e0b"
-                strokeWidth={2.5}
-                dot={false}
-                isAnimationActive={false}
-              />
-              {/* Intraday Price Line (Sky Blue) */}
-              <Line
-                type="monotone"
-                dataKey="price"
-                name="株価"
-                stroke="#38bdf8"
-                strokeWidth={2.2}
-                dot={{ r: 2.5, fill: '#38bdf8', strokeWidth: 0 }}
-                activeDot={{ r: 5, fill: '#38bdf8', stroke: '#fff' }}
-                isAnimationActive={false}
-              />
-              {showZoomBrush && (
-                <Brush
-                  dataKey="time"
-                  height={22}
-                  stroke="#38bdf8"
-                  fill="#0f172a"
-                />
-              )}
-            </LineChart>
-          </ResponsiveContainer>
+                className="h-56 will-change-transform"
+              >
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart
+                    data={chartData}
+                    margin={{ top: 8, right: 20, left: 10, bottom: 0 }}
+                  >
+                    <CartesianGrid
+                      strokeDasharray="3 3"
+                      stroke="#1e293b"
+                      vertical={false}
+                    />
+                    <XAxis
+                      dataKey="time"
+                      height={22}
+                      tick={{ fontSize: 10, fill: '#94a3b8' }}
+                      axisLine={false}
+                      tickLine={false}
+                      minTickGap={20}
+                    />
+                    <YAxis domain={yDomain} ticks={yTicks} hide />
+                    <Tooltip
+                      content={({ active, payload }) => {
+                        if (
+                          isDragging ||
+                          !active ||
+                          !payload ||
+                          !payload.length
+                        ) {
+                          return null
+                        }
+                        const pt = payload[0].payload as VwapDataPoint
+                        const diff = pt.price - pt.vwap
+                        const diffPct = pt.vwap > 0 ? (diff / pt.vwap) * 100 : 0
+                        return (
+                          <div className="bg-slate-900/95 border border-slate-600 rounded-xl p-2.5 text-xs shadow-xl space-y-1">
+                            <div className="font-bold text-slate-300 border-b border-slate-700 pb-1">
+                              ⏰ {pt.time} 時点
+                            </div>
+                            <div className="flex items-center justify-between gap-4">
+                              <span className="text-[#38bdf8] font-bold">
+                                株価：
+                              </span>
+                              <span className="font-extrabold text-white">
+                                {pt.price.toLocaleString()} 円
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between gap-4">
+                              <span className="text-[#f59e0b] font-bold">
+                                VWAP：
+                              </span>
+                              <span className="font-extrabold text-[#f59e0b]">
+                                {pt.vwap.toLocaleString()} 円
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between gap-4">
+                              <span className="text-slate-400">VWAP乖離：</span>
+                              <span
+                                className={`font-bold ${
+                                  diff >= 0
+                                    ? 'text-emerald-400'
+                                    : 'text-rose-400'
+                                }`}
+                              >
+                                {diff >= 0 ? '+' : ''}
+                                {diff.toFixed(1)}円 ({diffPct >= 0 ? '+' : ''}
+                                {diffPct.toFixed(2)}%)
+                              </span>
+                            </div>
+                          </div>
+                        )
+                      }}
+                    />
+                    {prevClose && (
+                      <ReferenceLine
+                        y={prevClose}
+                        stroke="#64748b"
+                        strokeDasharray="4 4"
+                        strokeWidth={1}
+                      />
+                    )}
+                    {/* VWAP Line (Gold/Amber) */}
+                    <Line
+                      type="monotone"
+                      dataKey="vwap"
+                      name="VWAP"
+                      stroke="#f59e0b"
+                      strokeWidth={2.5}
+                      dot={false}
+                      isAnimationActive={false}
+                    />
+                    {/* Intraday Price Line (Sky Blue) */}
+                    <Line
+                      type="monotone"
+                      dataKey="price"
+                      name="株価"
+                      stroke="#38bdf8"
+                      strokeWidth={2.2}
+                      dot={{ r: 2, fill: '#38bdf8', strokeWidth: 0 }}
+                      activeDot={{ r: 5, fill: '#38bdf8', stroke: '#fff' }}
+                      isAnimationActive={false}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+
+          {/* Horizontal Scrollbar Position Track */}
+          <div className="h-1.5 bg-slate-900 border-t border-slate-800/80 relative">
+            <div
+              className="h-full bg-sky-400/60 rounded-full transition-all duration-75"
+              style={{
+                width: `${thumbWidthPct}%`,
+                marginLeft: `${thumbLeftPct}%`,
+              }}
+            />
+          </div>
         </div>
       </div>
 
