@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Brush,
   CartesianGrid,
   Line,
   LineChart,
@@ -13,9 +14,14 @@ import {
   Activity,
   ArrowDownRight,
   ArrowUpRight,
-  Play,
+  ChevronLeft,
+  ChevronRight,
+  Hand,
+  Plus,
   RefreshCw,
   Search,
+  TrendingDown,
+  TrendingUp,
   Zap,
 } from 'lucide-react'
 import { useStockStore } from '../store/useStockStore'
@@ -47,28 +53,66 @@ const POPULAR_DAYTRADE_TICKERS: PresetTicker[] = [
   { code: '9432', name: 'NTT', basePrice: 155 },
 ]
 
-// Helper to generate realistic intraday points & cumulative VWAP (used for live demo mode or fallback)
-function generateSimulatedSession(basePrice: number, pointsCount = 45): VwapDataPoint[] {
+// Helper: deterministic pseudo-random generator seeded by stock code so the chart NEVER jumps randomly
+function seededNoise(seed: number, step: number): number {
+  const x = Math.sin(seed * 9301 + step * 49297 + 233280) * 10000
+  return x - Math.floor(x)
+}
+
+// Recompute cumulative VWAP for a series of points after manual edits
+function recomputeVwapSeries(points: VwapDataPoint[]): VwapDataPoint[] {
+  let cumPV = 0
+  let cumVol = 0
+  return points.map((pt) => {
+    const vol = Math.max(100, pt.volume || 1000)
+    cumPV += pt.price * vol
+    cumVol += vol
+    const vwap = Math.round((cumPV / cumVol) * 10) / 10
+    return {
+      ...pt,
+      volume: vol,
+      cumVolume: cumVol,
+      vwap,
+    }
+  })
+}
+
+// Helper to generate realistic deterministic intraday points & cumulative VWAP
+function generateSimulatedSession(
+  basePrice: number,
+  codeSeedStr = '7011',
+  pointsCount = 36
+): VwapDataPoint[] {
   const result: VwapDataPoint[] = []
   let currentPrice = basePrice
   let cumPV = 0
   let cumVol = 0
 
+  const numericSeed =
+    codeSeedStr
+      .split('')
+      .reduce((acc, ch, idx) => acc + ch.charCodeAt(0) * (idx + 1), 0) || 7011
+
   const startHour = 9
   const startMin = 0
 
   for (let i = 0; i < pointsCount; i++) {
-    const totalMins = startMin + i * 2
+    const totalMins = startMin + i * 5
     const h = startHour + Math.floor(totalMins / 60)
     const m = totalMins % 60
     const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
 
-    // Slight trend + oscillation around VWAP
-    const wave = Math.sin(i / 6) * (basePrice * 0.0035)
-    const noise = (Math.random() - 0.48) * (basePrice * 0.004)
-    currentPrice = Math.max(10, Math.round(basePrice + wave + noise * Math.sqrt(i + 1)))
+    const wave = Math.sin((i + (numericSeed % 5)) / 4.5) * (basePrice * 0.005)
+    const n = (seededNoise(numericSeed, i) - 0.47) * (basePrice * 0.004)
+    currentPrice = Math.max(
+      10,
+      Math.round(basePrice + wave + n * Math.sqrt(i + 1))
+    )
 
-    const vol = Math.round((300 + Math.random() * 900) * (i < 5 ? 2.2 : 1)) * 100
+    const vol =
+      Math.round(
+        (300 + seededNoise(numericSeed + 7, i) * 900) * (i < 4 ? 2.0 : 1)
+      ) * 100
     cumPV += currentPrice * vol
     cumVol += vol
     const vwap = Math.round((cumPV / cumVol) * 10) / 10
@@ -91,13 +135,13 @@ export const VwapChartCard: React.FC = () => {
   const [selectedCode, setSelectedCode] = useState('7011')
   const [selectedName, setSelectedName] = useState('三菱重工')
   const [codeInput, setCodeInput] = useState('7011')
-  const [interval, setIntervalType] = useState<'1m' | '5m'>('1m')
-  const [isAutoRefresh, setIsAutoRefresh] = useState(true)
-  const [isDemoLive, setIsDemoLive] = useState(false)
+  const [interval, setIntervalType] = useState<'1m' | '5m'>('5m')
   const [isLoading, setIsLoading] = useState(false)
-  const [dataSourceLabel, setDataSourceLabel] = useState<string>('東証データ取得中...')
+  const [dataSourceLabel, setDataSourceLabel] = useState<string>('手動操作モード（自動更新停止中）')
   const [prevClose, setPrevClose] = useState<number | null>(null)
-  const [chartData, setChartData] = useState<VwapDataPoint[]>([])
+  const [allChartData, setAllChartData] = useState<VwapDataPoint[]>([])
+  const [visibleCount, setVisibleCount] = useState<number>(36)
+  const [showZoomBrush, setShowZoomBrush] = useState<boolean>(false)
 
   const cumPVRef = useRef(0)
   const cumVolRef = useRef(0)
@@ -120,6 +164,9 @@ export const VwapChartCard: React.FC = () => {
     }
     return merged
   }, [savedStocks])
+
+  const tickerListRef = useRef(tickerList)
+  tickerListRef.current = tickerList
 
   // Parse Yahoo Finance v8 chart response and compute cumulative Intraday VWAP
   const parseYahooChartAndComputeVwap = (rawChartResult: unknown): {
@@ -175,14 +222,12 @@ export const VwapChartCard: React.FC = () => {
         const l = lows[i] ?? c
         const v = Math.max(0, volumes[i] ?? 0)
 
-        // Typical price for bar = (High + Low + Close) / 3
         const typicalPrice = (h + l + c) / 3
 
         if (v > 0) {
           cumPV += typicalPrice * v
           cumVol += v
         } else if (cumVol === 0) {
-          // First bar with 0 volume fallback
           cumPV = c
           cumVol = 1
         }
@@ -201,7 +246,7 @@ export const VwapChartCard: React.FC = () => {
           timestamp: timestamps[i] * 1000,
           price: Math.round(c * 10) / 10,
           vwap,
-          volume: v,
+          volume: v || 1000,
           cumVolume: cumVol,
         })
       }
@@ -220,6 +265,7 @@ export const VwapChartCard: React.FC = () => {
     }
   }
 
+  // Only fetches when explicitly requested (ticker change, interval change, or manual refresh button)
   const fetchIntradayData = useCallback(
     async (codeToFetch: string, intervalToFetch: '1m' | '5m') => {
       setIsLoading(true)
@@ -240,14 +286,14 @@ export const VwapChartCard: React.FC = () => {
           const json = await apiRes.json()
           const parsed = parseYahooChartAndComputeVwap(json.data)
           if (parsed && parsed.points.length > 0) {
-            setChartData(parsed.points)
+            setAllChartData(parsed.points)
+            setVisibleCount(parsed.points.length)
             setPrevClose(parsed.previousClose)
             const nowStr = new Date().toLocaleTimeString('ja-JP', {
               hour: '2-digit',
               minute: '2-digit',
-              second: '2-digit',
             })
-            setDataSourceLabel(`東証データ (${nowStr}更新)`)
+            setDataSourceLabel(`東証データ (${nowStr}取得・自動更新OFF)`)
             setIsLoading(false)
             return
           }
@@ -263,38 +309,14 @@ export const VwapChartCard: React.FC = () => {
           const rawData = await viteProxyRes.json()
           const parsed = parseYahooChartAndComputeVwap(rawData)
           if (parsed && parsed.points.length > 0) {
-            setChartData(parsed.points)
+            setAllChartData(parsed.points)
+            setVisibleCount(parsed.points.length)
             setPrevClose(parsed.previousClose)
             const nowStr = new Date().toLocaleTimeString('ja-JP', {
               hour: '2-digit',
               minute: '2-digit',
-              second: '2-digit',
             })
-            setDataSourceLabel(`東証データ (${nowStr}更新)`)
-            setIsLoading(false)
-            return
-          }
-        }
-
-        // 3. Fallback: public CORS proxy if static hosted without /api/chart
-        const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
-          yahooSym
-        )}?interval=${intervalToFetch}&range=1d&includePrePost=false`
-        const proxyRes = await fetch(
-          `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`
-        )
-        if (proxyRes.ok) {
-          const rawData = await proxyRes.json()
-          const parsed = parseYahooChartAndComputeVwap(rawData)
-          if (parsed && parsed.points.length > 0) {
-            setChartData(parsed.points)
-            setPrevClose(parsed.previousClose)
-            const nowStr = new Date().toLocaleTimeString('ja-JP', {
-              hour: '2-digit',
-              minute: '2-digit',
-              second: '2-digit',
-            })
-            setDataSourceLabel(`東証データ (${nowStr}更新)`)
+            setDataSourceLabel(`東証データ (${nowStr}取得・自動更新OFF)`)
             setIsLoading(false)
             return
           }
@@ -302,73 +324,30 @@ export const VwapChartCard: React.FC = () => {
 
         throw new Error('Fallback to simulated intraday data')
       } catch {
-        // 3. Fallback to realistic simulated intraday session so chart always works offline
-        const matched = tickerList.find((t) => t.code === cleanCode)
-        const base = matched?.basePrice || parseFloat(oco.priceInput) || 2000
-        const sim = generateSimulatedSession(base, 45)
-        setChartData(sim)
+        const matched = tickerListRef.current.find((t) => t.code === cleanCode)
+        const base = matched?.basePrice || 2000
+        const sim = generateSimulatedSession(base, cleanCode, 36)
+        setAllChartData(sim)
+        setVisibleCount(sim.length)
         setPrevClose(base)
-        setDataSourceLabel('シミュレーション表示中')
+        setDataSourceLabel('手動操作チャート（自動更新OFF）')
       } finally {
         setIsLoading(false)
       }
     },
-    [oco.priceInput, tickerList]
+    []
   )
 
-  // Initial & symbol/interval change fetch
+  // Initial & symbol/interval change fetch ONLY (no automatic background polling!)
   useEffect(() => {
-    if (!isDemoLive) {
-      void fetchIntradayData(selectedCode, interval)
-    }
-  }, [selectedCode, interval, isDemoLive, fetchIntradayData])
+    void fetchIntradayData(selectedCode, interval)
+  }, [selectedCode, interval, fetchIntradayData])
 
-  // Auto-refresh every 12 seconds when LIVE auto-refresh is enabled (and not in demo tick mode)
-  useEffect(() => {
-    if (!isAutoRefresh || isDemoLive) return
-    const timer = window.setInterval(() => {
-      void fetchIntradayData(selectedCode, interval)
-    }, 12000)
-    return () => window.clearInterval(timer)
-  }, [isAutoRefresh, isDemoLive, selectedCode, interval, fetchIntradayData])
-
-  // Demo real-time tick mode (ticks every 1.5 seconds so the user can test live VWAP crossover anytime, even at night!)
-  useEffect(() => {
-    if (!isDemoLive) return
-    const timer = window.setInterval(() => {
-      setChartData((prev) => {
-        if (prev.length === 0) return prev
-        const last = prev[prev.length - 1]
-        const step = Math.max(1, Math.round(last.price * 0.0025))
-        const delta = Math.round((Math.random() - 0.48) * step * 2)
-        const nextPrice = Math.max(10, last.price + delta)
-        const tickVol = Math.round(200 + Math.random() * 800) * 100
-
-        const prevCumVol = last.cumVolume || 100000
-        const prevCumPV = last.vwap * prevCumVol
-        const nextCumVol = prevCumVol + tickVol
-        const nextCumPV = prevCumPV + nextPrice * tickVol
-        const nextVwap = Math.round((nextCumPV / nextCumVol) * 10) / 10
-
-        const now = new Date()
-        const timeLabel = now.toLocaleTimeString('ja-JP', {
-          minute: '2-digit',
-          second: '2-digit',
-        })
-
-        const nextPoint: VwapDataPoint = {
-          time: timeLabel,
-          timestamp: Date.now(),
-          price: nextPrice,
-          vwap: nextVwap,
-          volume: tickVol,
-          cumVolume: nextCumVol,
-        }
-        return [...prev.slice(-59), nextPoint]
-      })
-    }, 1500)
-    return () => window.clearInterval(timer)
-  }, [isDemoLive])
+  // Sliced chart data according to the manual time-seek slider (`visibleCount`)
+  const chartData = useMemo(
+    () => allChartData.slice(0, Math.max(2, visibleCount)),
+    [allChartData, visibleCount]
+  )
 
   const latestPoint =
     chartData.length > 0 ? chartData[chartData.length - 1] : null
@@ -378,6 +357,51 @@ export const VwapChartCard: React.FC = () => {
   const vwapDiffPercent =
     currentVwap > 0 ? (vwapDiff / currentVwap) * 100 : 0
   const isAboveVwap = vwapDiff >= 0
+
+  const priceStep = useMemo(() => {
+    if (currentPrice >= 10000) return 50
+    if (currentPrice >= 3000) return 15
+    if (currentPrice >= 500) return 5
+    return 1
+  }, [currentPrice])
+
+  // Manually adjust the currently displayed latest bar's price
+  const handleAdjustCurrentPrice = (newPrice: number) => {
+    const targetIdx = Math.max(0, chartData.length - 1)
+    setAllChartData((prev) => {
+      if (prev.length === 0) return prev
+      const copy = [...prev]
+      copy[targetIdx] = {
+        ...copy[targetIdx],
+        price: Math.max(1, Math.round(newPrice)),
+      }
+      return recomputeVwapSeries(copy)
+    })
+    setDataSourceLabel('✍️ 手動調整中（自動更新OFF）')
+  }
+
+  // Manually append a new bar (+上昇足 / 横ばい足 / -下落足)
+  const handleAppendCustomBar = (deltaSteps: number, volMultiplier = 1.5) => {
+    setAllChartData((prev) => {
+      const activeSlice = prev.slice(0, Math.max(2, visibleCount))
+      const last = activeSlice[activeSlice.length - 1]
+      if (!last) return prev
+      const nextPrice = Math.max(1, Math.round(last.price + deltaSteps * priceStep))
+      const nextVol = Math.round((last.volume || 50000) * volMultiplier)
+      const nextPoint: VwapDataPoint = {
+        time: `手動+${activeSlice.length + 1}`,
+        timestamp: Date.now(),
+        price: nextPrice,
+        vwap: last.vwap,
+        volume: nextVol,
+        cumVolume: last.cumVolume + nextVol,
+      }
+      const updated = recomputeVwapSeries([...activeSlice, nextPoint])
+      setVisibleCount(updated.length)
+      return updated
+    })
+    setDataSourceLabel('✍️ 手動調整中（自動更新OFF）')
+  }
 
   // Compute chart Y-axis domain with padding so price and VWAP lines are clearly visible
   const yDomain = useMemo(() => {
@@ -433,38 +457,29 @@ export const VwapChartCard: React.FC = () => {
 
   return (
     <div className="bg-[#1e2433] text-white rounded-3xl p-4 shadow-xl border border-slate-700/80 space-y-3.5">
-      {/* Top Header: Title + Live Status + Interval Toggle */}
+      {/* Top Header: Title + Static Status + Interval + Manual Refresh */}
       <div className="flex items-center justify-between gap-2 flex-wrap">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <div className="flex items-center gap-1.5">
             <Activity className="w-4 h-4 text-amber-400" />
             <h2 className="text-sm sm:text-base font-extrabold text-white">
-              リアルタイム株価 ＆ VWAPチャート
+              銘柄別 株価 ＆ VWAPチャート
             </h2>
           </div>
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700">
-            <span
-              className={`w-1.5 h-1.5 rounded-full ${
-                isDemoLive || isAutoRefresh
-                  ? 'bg-emerald-400 animate-pulse'
-                  : 'bg-slate-400'
-              }`}
-            />
-            {isDemoLive ? 'ライブ値動きデモ中' : dataSourceLabel}
+            <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
+            {dataSourceLabel}
           </span>
         </div>
 
-        {/* 1m / 5m + Demo Mode + Manual Refresh */}
+        {/* 1m / 5m + Manual Refresh Button */}
         <div className="flex items-center gap-1.5">
           <div className="bg-[#0f172a] p-0.5 rounded-lg border border-slate-700 flex text-[11px] font-bold">
             <button
               type="button"
-              onClick={() => {
-                setIsDemoLive(false)
-                setIntervalType('1m')
-              }}
-              className={`px-2 py-1 rounded-md transition ${
-                !isDemoLive && interval === '1m'
+              onClick={() => setIntervalType('1m')}
+              className={`px-2.5 py-1 rounded-md transition ${
+                interval === '1m'
                   ? 'bg-blue-600 text-white'
                   : 'text-slate-400 hover:text-white'
               }`}
@@ -473,45 +488,27 @@ export const VwapChartCard: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={() => {
-                setIsDemoLive(false)
-                setIntervalType('5m')
-              }}
-              className={`px-2 py-1 rounded-md transition ${
-                !isDemoLive && interval === '5m'
+              onClick={() => setIntervalType('5m')}
+              className={`px-2.5 py-1 rounded-md transition ${
+                interval === '5m'
                   ? 'bg-blue-600 text-white'
                   : 'text-slate-400 hover:text-white'
               }`}
             >
               5分足
             </button>
-            <button
-              type="button"
-              onClick={() => setIsDemoLive(!isDemoLive)}
-              className={`px-2 py-1 rounded-md flex items-center gap-0.5 transition ${
-                isDemoLive
-                  ? 'bg-amber-500 text-slate-950 font-extrabold'
-                  : 'text-amber-300 hover:text-amber-200'
-              }`}
-              title="夜間や休場中でもリアルタイムに株価とVWAPが動くデモモード"
-            >
-              <Play className="w-2.5 h-2.5 fill-current" />
-              デモ稼働
-            </button>
           </div>
 
           <button
             type="button"
-            onClick={() => {
-              setIsDemoLive(false)
-              void fetchIntradayData(selectedCode, interval)
-            }}
-            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-600 active:scale-95 transition"
-            title="最新データを再取得"
+            onClick={() => void fetchIntradayData(selectedCode, interval)}
+            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 text-[11px] font-bold flex items-center gap-1 active:scale-95 transition"
+            title="ボタンを押した時だけ最新データを取得します（勝手に動きません）"
           >
             <RefreshCw
               className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`}
             />
+            手動で再取得
           </button>
         </div>
       </div>
@@ -554,22 +551,131 @@ export const VwapChartCard: React.FC = () => {
           </div>
           <button
             type="submit"
-            className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-xs font-bold text-slate-200 shrink-0 active:scale-95 transition"
+            className="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs font-extrabold text-white shrink-0 active:scale-95 transition"
           >
             銘柄切替
           </button>
-          <button
-            type="button"
-            onClick={() => setIsAutoRefresh(!isAutoRefresh)}
-            className={`px-2.5 py-1.5 rounded-xl border text-[11px] font-bold shrink-0 transition ${
-              isAutoRefresh
-                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50'
-                : 'bg-slate-800 text-slate-400 border-slate-700'
-            }`}
-          >
-            {isAutoRefresh ? '自動更新ON' : '自動更新OFF'}
-          </button>
         </form>
+      </div>
+
+      {/* Manual Chart Manipulation Panel: Time Scrubbing & Direct Price Control */}
+      <div className="bg-[#0f172a] rounded-2xl p-3 border border-slate-700/90 space-y-3">
+        {/* 1. Time Seek Slider */}
+        <div className="space-y-1.5 pb-2.5 border-b border-slate-800">
+          <div className="flex items-center justify-between text-xs">
+            <span className="font-extrabold text-amber-300 flex items-center gap-1">
+              ⏱️ チャートの時間を自分で動かす（コマ送り・巻き戻し）
+            </span>
+            <span className="font-mono text-[11px] font-bold text-slate-300 bg-slate-800 px-2 py-0.5 rounded-md border border-slate-700">
+              {latestPoint?.time || '--:--'} 時点 ({chartData.length}/
+              {allChartData.length}本)
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={visibleCount <= 2}
+              onClick={() => setVisibleCount((v) => Math.max(2, v - 1))}
+              className="px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-35 text-xs font-bold flex items-center gap-0.5 border border-slate-600 shrink-0"
+            >
+              <ChevronLeft className="w-3.5 h-3.5" />
+              戻す
+            </button>
+            <input
+              type="range"
+              min={2}
+              max={Math.max(2, allChartData.length)}
+              step={1}
+              value={visibleCount}
+              onChange={(e) => setVisibleCount(parseInt(e.target.value, 10))}
+              className="flex-1 accent-amber-400 cursor-pointer"
+            />
+            <button
+              type="button"
+              disabled={visibleCount >= allChartData.length}
+              onClick={() =>
+                setVisibleCount((v) => Math.min(allChartData.length, v + 1))
+              }
+              className="px-2.5 py-1 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-35 text-xs font-extrabold flex items-center gap-0.5 text-white shrink-0"
+            >
+              進める
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+
+        {/* 2. Direct Price Adjustment & Bar Appending */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between flex-wrap gap-1.5">
+            <span className="text-xs font-extrabold text-sky-300 flex items-center gap-1">
+              <Hand className="w-3.5 h-3.5" />
+              現在足の株価を自分で動かす（{latestPoint?.time || '最新'}）
+            </span>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => handleAdjustCurrentPrice(currentPrice - priceStep)}
+                className="px-2 py-0.5 rounded-lg bg-rose-500/20 text-rose-300 border border-rose-500/40 text-xs font-extrabold active:scale-95"
+              >
+                -{priceStep}円
+              </button>
+              <span className="font-mono text-xs font-extrabold text-white px-1.5">
+                {Math.round(currentPrice).toLocaleString()}円
+              </span>
+              <button
+                type="button"
+                onClick={() => handleAdjustCurrentPrice(currentPrice + priceStep)}
+                className="px-2 py-0.5 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-xs font-extrabold active:scale-95"
+              >
+                +{priceStep}円
+              </button>
+            </div>
+          </div>
+
+          <input
+            type="range"
+            min={Math.max(10, Math.round(currentPrice * 0.9))}
+            max={Math.max(100, Math.round(currentPrice * 1.1))}
+            step={priceStep}
+            value={Math.round(currentPrice)}
+            onChange={(e) =>
+              handleAdjustCurrentPrice(parseInt(e.target.value, 10))
+            }
+            className="w-full accent-[#38bdf8] cursor-pointer"
+          />
+
+          <div className="flex items-center justify-between gap-1.5 pt-1 flex-wrap">
+            <span className="text-[11px] text-slate-400 font-bold">
+              ✍️ 次の足を自分で描き足す：
+            </span>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => handleAppendCustomBar(2, 1.8)}
+                className="px-2.5 py-1 rounded-lg bg-emerald-600/30 hover:bg-emerald-600/40 text-emerald-300 border border-emerald-500/50 text-[11px] font-extrabold flex items-center gap-1 active:scale-95 transition"
+              >
+                <TrendingUp className="w-3 h-3" />
+                +上昇足
+              </button>
+              <button
+                type="button"
+                onClick={() => handleAppendCustomBar(0, 1.0)}
+                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-600 text-[11px] font-bold flex items-center gap-1 active:scale-95 transition"
+              >
+                <Plus className="w-3 h-3" />
+                横ばい足
+              </button>
+              <button
+                type="button"
+                onClick={() => handleAppendCustomBar(-2, 1.8)}
+                className="px-2.5 py-1 rounded-lg bg-rose-600/30 hover:bg-rose-600/40 text-rose-300 border border-rose-500/50 text-[11px] font-extrabold flex items-center gap-1 active:scale-95 transition"
+              >
+                <TrendingDown className="w-3 h-3" />
+                -下落足
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Current Price vs VWAP Summary Banner */}
@@ -577,7 +683,7 @@ export const VwapChartCard: React.FC = () => {
         <div>
           <div className="text-[11px] text-slate-400 font-bold flex items-center gap-1">
             <span className="w-2 h-2 rounded-full bg-[#38bdf8] inline-block" />
-            現在株価 ({selectedCode})
+            選択時点の株価
           </div>
           <div className="text-xl sm:text-2xl font-extrabold text-[#38bdf8] tracking-tight mt-0.5">
             {currentPrice > 0 ? `${formatNumber(currentPrice, 1)}円` : '---'}
@@ -624,13 +730,24 @@ export const VwapChartCard: React.FC = () => {
         </div>
       </div>
 
-      {/* Real-time Line Chart: Price + VWAP */}
+      {/* Line Chart: Price + VWAP */}
       <div className="bg-[#0f172a] rounded-2xl p-3 border border-slate-700/80">
-        <div className="flex items-center justify-between text-xs mb-2">
+        <div className="flex items-center justify-between text-xs mb-2 flex-wrap gap-2">
           <span className="font-bold text-slate-300">
             {selectedCode} {selectedName}（株価 ＆ VWAP 推移）
           </span>
-          <div className="flex items-center gap-3 text-[11px] font-bold">
+          <div className="flex items-center gap-2.5 text-[11px] font-bold">
+            <button
+              type="button"
+              onClick={() => setShowZoomBrush(!showZoomBrush)}
+              className={`px-2 py-0.5 rounded-md text-[10px] font-bold border transition ${
+                showZoomBrush
+                  ? 'bg-blue-600 text-white border-blue-400'
+                  : 'bg-slate-900 text-slate-400 border-slate-700'
+              }`}
+            >
+              🔍 ズームバー {showZoomBrush ? 'ON' : 'OFF'}
+            </button>
             <span className="flex items-center gap-1 text-[#38bdf8]">
               <span className="w-3 h-0.5 bg-[#38bdf8] inline-block" />
               株価
@@ -639,16 +756,10 @@ export const VwapChartCard: React.FC = () => {
               <span className="w-3 h-0.5 bg-[#f59e0b] inline-block" />
               VWAP
             </span>
-            {prevClose && (
-              <span className="flex items-center gap-1 text-slate-400">
-                <span className="w-2.5 h-0.5 border-b border-dashed border-slate-400 inline-block" />
-                前日終値
-              </span>
-            )}
           </div>
         </div>
 
-        <div className="h-52 w-full">
+        <div className="h-56 w-full">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart
               data={chartData}
@@ -737,10 +848,18 @@ export const VwapChartCard: React.FC = () => {
                 name="株価"
                 stroke="#38bdf8"
                 strokeWidth={2.2}
-                dot={false}
-                activeDot={{ r: 4, fill: '#38bdf8', stroke: '#fff' }}
+                dot={{ r: 2.5, fill: '#38bdf8', strokeWidth: 0 }}
+                activeDot={{ r: 5, fill: '#38bdf8', stroke: '#fff' }}
                 isAnimationActive={false}
               />
+              {showZoomBrush && (
+                <Brush
+                  dataKey="time"
+                  height={22}
+                  stroke="#38bdf8"
+                  fill="#0f172a"
+                />
+              )}
             </LineChart>
           </ResponsiveContainer>
         </div>

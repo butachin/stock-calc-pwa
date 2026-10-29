@@ -2,7 +2,9 @@ import React, { useMemo, useState } from 'react'
 import {
   Bar,
   BarChart,
+  Brush,
   CartesianGrid,
+  Cell,
   ComposedChart,
   Line,
   ReferenceLine,
@@ -10,16 +12,20 @@ import {
   Tooltip,
   XAxis,
   YAxis,
-  Cell,
 } from 'recharts'
 import {
   Activity,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Hand,
+  Plus,
   RotateCcw,
   ShieldAlert,
   Sliders,
   Sparkles,
   Target,
+  TrendingDown,
   TrendingUp,
 } from 'lucide-react'
 import { VwapChartCard } from './VwapChartCard'
@@ -28,7 +34,7 @@ import { VwapChartCard } from './VwapChartCard'
 // 型定義および3パターンの日中基準時系列データ（09:00〜15:30 完全収録）
 // ============================================================================
 
-export type PatternKey = 'pullback' | 'breakout' | 'rejection'
+export type PatternKey = 'pullback' | 'breakout' | 'rejection' | 'custom'
 
 export interface IntradayBasePoint {
   time: string
@@ -40,6 +46,7 @@ export interface IntradayBasePoint {
 }
 
 export interface CalculatedIntradayPoint extends IntradayBasePoint {
+  index: number
   price: number
   volume: number
   vwap: number
@@ -53,7 +60,7 @@ export interface CalculatedIntradayPoint extends IntradayBasePoint {
 }
 
 export const INTRADAY_PATTERNS: Record<
-  PatternKey,
+  Exclude<PatternKey, 'custom'>,
   {
     title: string
     shortLabel: string
@@ -220,14 +227,47 @@ export const VwapBandSimulator: React.FC = () => {
   const [volumeMultiplier, setVolumeMultiplier] = useState<number>(2.0)
   const [volatilityMultiplier, setVolatilityMultiplier] = useState<number>(1.0)
   const [show1Sigma, setShow1Sigma] = useState<boolean>(true)
+  const [showZoomBrush, setShowZoomBrush] = useState<boolean>(false)
 
-  const currentPattern = INTRADAY_PATTERNS[patternKey]
+  // 自分で自由に動かせるカスタムポイント配列＆選択中の時間インデックス
+  const [customPoints, setCustomPoints] = useState<IntradayBasePoint[]>(() =>
+    INTRADAY_PATTERNS.pullback.points.map((p) => ({ ...p }))
+  )
+  const [selectedPointIndex, setSelectedPointIndex] = useState<number>(5) // Default 10:15
+  // 時間経過シーク（何本目までチャートを表示するか：手動で1本ずつ進められる機能）
+  const [visibleCount, setVisibleCount] = useState<number>(
+    INTRADAY_PATTERNS.pullback.points.length
+  )
+
+  const handleSelectPattern = (key: Exclude<PatternKey, 'custom'>) => {
+    setPatternKey(key)
+    const cloned = INTRADAY_PATTERNS[key].points.map((p) => ({ ...p }))
+    setCustomPoints(cloned)
+    setVisibleCount(cloned.length)
+    setSelectedPointIndex(Math.min(5, cloned.length - 1))
+  }
+
+  const activePatternMeta =
+    patternKey === 'custom'
+      ? {
+          title: '✍️ カスタム自由操作モード（株価・出来高を手動コントロール）',
+          entryRule:
+            '下の「選択中の足を動かす」スライダーやボタンで、好きな時刻の株価・出来高を動かしてVWAPの反応を実験できます',
+          takeProfitRule:
+            '株価を急騰させると+2σバンドが広がり、大口出来高を入れるとVWAPが株価側へ強く引き寄せられます',
+          stopLossRule:
+            '1本ずつ時間を進めたり戻したりして、VWAPクロスやバンドタッチの動きを自由に確認できます',
+        }
+      : INTRADAY_PATTERNS[patternKey]
 
   // ============================================================================
-  // 2. リアルタイムVWAP＆標準偏差バンド（±2σ）の算出ロジック
+  // リアルタイムVWAP＆標準偏差バンド（±2σ）の算出ロジック
   // ============================================================================
-  const calculatedData = useMemo<CalculatedIntradayPoint[]>(() => {
-    const basePoints = currentPattern.points
+  const allCalculatedData = useMemo<CalculatedIntradayPoint[]>(() => {
+    const basePoints =
+      patternKey === 'custom'
+        ? customPoints
+        : INTRADAY_PATTERNS[patternKey].points
     const adjustedPrices: number[] = []
     const adjustedVolumes: number[] = []
     const result: CalculatedIntradayPoint[] = []
@@ -239,12 +279,17 @@ export const VwapBandSimulator: React.FC = () => {
       const pt = basePoints[k]
 
       // 1. 調整後価格 P_k と調整後出来高 V_k の算出（基準値 P_0 = 5000）
-      const P_k = Math.round(
-        5000 + (pt.basePrice - 5000) * volatilityMultiplier
-      )
-      const V_k = Math.round(
-        pt.baseVolume * (pt.isInflection ? volumeMultiplier : 1.0)
-      )
+      const P_k =
+        patternKey === 'custom'
+          ? Math.round(pt.basePrice)
+          : Math.round(5000 + (pt.basePrice - 5000) * volatilityMultiplier)
+
+      const V_k =
+        patternKey === 'custom'
+          ? Math.round(pt.baseVolume)
+          : Math.round(
+              pt.baseVolume * (pt.isInflection ? volumeMultiplier : 1.0)
+            )
 
       adjustedPrices.push(P_k)
       adjustedVolumes.push(V_k)
@@ -275,6 +320,7 @@ export const VwapBandSimulator: React.FC = () => {
 
       result.push({
         ...pt,
+        index: k,
         price: P_k,
         volume: V_k,
         vwap: VWAP_k,
@@ -289,7 +335,80 @@ export const VwapBandSimulator: React.FC = () => {
     }
 
     return result
-  }, [currentPattern, volumeMultiplier, volatilityMultiplier])
+  }, [patternKey, customPoints, volumeMultiplier, volatilityMultiplier])
+
+  // Time seek: show up to `visibleCount` bars so user can step forward/backward in time manually
+  const calculatedData = useMemo(
+    () => allCalculatedData.slice(0, Math.max(2, visibleCount)),
+    [allCalculatedData, visibleCount]
+  )
+
+  const activePointIndex = Math.min(
+    selectedPointIndex,
+    calculatedData.length - 1
+  )
+  const selectedPoint = calculatedData[activePointIndex] || calculatedData[0]
+
+  // Edit a specific point's price or volume directly (switches to custom mode preserving current scaled values)
+  const updateSelectedPoint = (newPrice?: number, newVol?: number) => {
+    const baseList =
+      patternKey === 'custom'
+        ? [...customPoints]
+        : allCalculatedData.map((d) => ({
+            time: d.time,
+            basePrice: d.price,
+            baseVolume: d.volume,
+            isInflection: d.isInflection,
+            signalLabel: d.signalLabel,
+            signalType: d.signalType,
+          }))
+
+    const target = baseList[activePointIndex]
+    if (!target) return
+
+    baseList[activePointIndex] = {
+      ...target,
+      basePrice:
+        newPrice !== undefined ? Math.max(100, newPrice) : target.basePrice,
+      baseVolume:
+        newVol !== undefined ? Math.max(100, newVol) : target.baseVolume,
+      isInflection:
+        newVol !== undefined && newVol >= 1500 ? true : target.isInflection,
+    }
+
+    setPatternKey('custom')
+    setCustomPoints(baseList)
+  }
+
+  // Append a new bar manually at the end so the user can "draw" the next candle themselves
+  const handleAddNextBar = (priceDelta: number, vol = 1200) => {
+    const baseList =
+      patternKey === 'custom'
+        ? [...customPoints]
+        : allCalculatedData.map((d) => ({
+            time: d.time,
+            basePrice: d.price,
+            baseVolume: d.volume,
+            isInflection: d.isInflection,
+            signalLabel: d.signalLabel,
+            signalType: d.signalType,
+          }))
+
+    const last = baseList[baseList.length - 1]
+    const nextPrice = Math.max(100, (last?.basePrice || 5000) + priceDelta)
+    const nextNum = baseList.length + 1
+    const newPt: IntradayBasePoint = {
+      time: `追加${nextNum}`,
+      basePrice: nextPrice,
+      baseVolume: vol,
+      isInflection: vol >= 2000,
+    }
+    const updated = [...baseList, newPt]
+    setPatternKey('custom')
+    setCustomPoints(updated)
+    setVisibleCount(updated.length)
+    setSelectedPointIndex(updated.length - 1)
+  }
 
   const yDomain = useMemo(() => {
     if (calculatedData.length === 0) return [4700, 5300]
@@ -310,7 +429,7 @@ export const VwapBandSimulator: React.FC = () => {
 
   return (
     <div className="space-y-4 pb-6">
-      {/* Sub-navigation Switcher: ±2σ Band Simulator vs Live Stock VWAP Chart */}
+      {/* Sub-navigation Switcher: ±2σ Band Simulator vs Real Stock Static VWAP Chart */}
       <div className="bg-slate-200/80 p-1 rounded-2xl grid grid-cols-2 gap-1">
         <button
           type="button"
@@ -322,7 +441,7 @@ export const VwapBandSimulator: React.FC = () => {
           }`}
         >
           <Sliders className="w-3.5 h-3.5 text-amber-500" />
-          VWAP±2σ バンド学習
+          VWAP±2σ 手動シミュレーター
         </button>
         <button
           type="button"
@@ -334,7 +453,7 @@ export const VwapBandSimulator: React.FC = () => {
           }`}
         >
           <Activity className="w-3.5 h-3.5 text-emerald-600" />
-          リアル銘柄VWAPチャート
+          銘柄別VWAPチャート
         </button>
       </div>
 
@@ -352,7 +471,7 @@ export const VwapBandSimulator: React.FC = () => {
                 </h2>
               </div>
               <p className="text-[11px] text-slate-400 mt-0.5">
-                大口出来高とボラティリティがVWAP・±2σバンドに与える影響を可視化
+                自分の手で時間を進めたり、株価・出来高を動かしてVWAPの変化を確認できます
               </p>
             </div>
 
@@ -361,11 +480,12 @@ export const VwapBandSimulator: React.FC = () => {
               onClick={() => {
                 setVolumeMultiplier(2.0)
                 setVolatilityMultiplier(1.0)
+                handleSelectPattern('pullback')
               }}
               className="px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-bold flex items-center gap-1 border border-slate-600 shrink-0 transition"
             >
               <RotateCcw className="w-3 h-3" />
-              初期値
+              リセット
             </button>
           </div>
 
@@ -384,7 +504,7 @@ export const VwapBandSimulator: React.FC = () => {
                 <button
                   key={key}
                   type="button"
-                  onClick={() => setPatternKey(key)}
+                  onClick={() => handleSelectPattern(key)}
                   className={`py-2 px-2 rounded-xl text-xs font-extrabold transition ${
                     isSelected
                       ? `${color} text-white shadow-sm`
@@ -397,89 +517,310 @@ export const VwapBandSimulator: React.FC = () => {
             })}
           </div>
 
-          {/* 2. スライダーコントロール（大口出来高の強さ & ボラティリティ） */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 bg-[#0f172a] rounded-2xl p-3 border border-slate-700/90">
-            {/* Slider 1: volumeMultiplier */}
-            <div className="space-y-1">
+          {/* 2. 自分の手でチャートを動かすコントロールパネル（時間コマ送り ＆ 選択地点の株価・出来高編集） */}
+          <div className="bg-[#0f172a] rounded-2xl p-3.5 border border-slate-700/90 space-y-3">
+            {/* (A) 時間シークバー（09:00〜15:30 を自分の指で進める・戻す） */}
+            <div className="space-y-1.5 pb-3 border-b border-slate-800">
               <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-slate-300">
-                  🔥 節目の大口出来高倍率
+                <span className="font-extrabold text-amber-300 flex items-center gap-1">
+                  ⏱️ チャートの時間を動かす（コマ送り・巻き戻し）
                 </span>
-                <span className="font-extrabold text-amber-300 bg-amber-500/15 px-2 py-0.5 rounded-md border border-amber-500/30">
-                  {volumeMultiplier.toFixed(1)} 倍
+                <span className="font-mono font-bold text-white bg-slate-800 px-2 py-0.5 rounded-lg border border-slate-700">
+                  表示: 09:00 〜 {calculatedData[calculatedData.length - 1]?.time} (
+                  {calculatedData.length}/{allCalculatedData.length}本)
                 </span>
               </div>
-              <input
-                type="range"
-                min={1.0}
-                max={5.0}
-                step={0.5}
-                value={volumeMultiplier}
-                onChange={(e) =>
-                  setVolumeMultiplier(parseFloat(e.target.value))
-                }
-                className="w-full accent-amber-400 cursor-pointer"
-              />
-              <div className="flex justify-between text-[10px] text-slate-500">
-                <span>1.0x (通常)</span>
-                <span>VWAP引き寄せ強</span>
-                <span>5.0x (機関大口)</span>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={visibleCount <= 2}
+                  onClick={() => {
+                    const next = Math.max(2, visibleCount - 1)
+                    setVisibleCount(next)
+                    setSelectedPointIndex(next - 1)
+                  }}
+                  className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-35 text-xs font-bold flex items-center gap-0.5 border border-slate-600 shrink-0"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                  1本戻す
+                </button>
+
+                <input
+                  type="range"
+                  min={2}
+                  max={allCalculatedData.length}
+                  step={1}
+                  value={visibleCount}
+                  onChange={(e) => {
+                    const next = parseInt(e.target.value, 10)
+                    setVisibleCount(next)
+                    setSelectedPointIndex(next - 1)
+                  }}
+                  className="flex-1 accent-amber-400 cursor-pointer"
+                />
+
+                <button
+                  type="button"
+                  disabled={visibleCount >= allCalculatedData.length}
+                  onClick={() => {
+                    const next = Math.min(
+                      allCalculatedData.length,
+                      visibleCount + 1
+                    )
+                    setVisibleCount(next)
+                    setSelectedPointIndex(next - 1)
+                  }}
+                  className="px-2.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-35 text-xs font-extrabold flex items-center gap-0.5 text-white shrink-0"
+                >
+                  1本進める
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
               </div>
             </div>
 
-            {/* Slider 2: volatilityMultiplier */}
-            <div className="space-y-1">
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-slate-300">
-                  ⚡ 値動きの荒さ（ボラ倍率）
-                </span>
-                <span className="font-extrabold text-sky-300 bg-sky-500/15 px-2 py-0.5 rounded-md border border-sky-500/30">
-                  {volatilityMultiplier.toFixed(1)} 倍
-                </span>
+            {/* (B) 選択中の地点の「株価」と「出来高」を自分で直接動かすコントロール */}
+            {selectedPoint && (
+              <div className="space-y-2.5">
+                <div className="flex items-center justify-between flex-wrap gap-1">
+                  <span className="text-xs font-extrabold text-sky-300 flex items-center gap-1">
+                    <Hand className="w-3.5 h-3.5" />
+                    グラフ上の点をタップ（現在選択中: {selectedPoint.time}）して株価を動かす
+                  </span>
+                  <span className="text-[11px] text-slate-400">
+                    VWAP: <strong className="text-amber-300">{selectedPoint.vwapRounded}円</strong> / 乖離:{' '}
+                    <strong
+                      className={
+                        selectedPoint.vwapDeviationRate >= 0
+                          ? 'text-emerald-400'
+                          : 'text-rose-400'
+                      }
+                    >
+                      {selectedPoint.vwapDeviationRate >= 0 ? '+' : ''}
+                      {selectedPoint.vwapDeviationRate}%
+                    </strong>
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {/* Direct Price Control for Selected Point */}
+                  <div className="bg-slate-900/90 border border-slate-700 rounded-xl p-2.5 space-y-1.5">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-slate-300 font-bold">
+                        {selectedPoint.time} の株価
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateSelectedPoint(selectedPoint.price - 20)
+                          }
+                          className="px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 text-[11px] font-bold active:scale-95"
+                        >
+                          -20円
+                        </button>
+                        <span className="font-mono font-extrabold text-[#38bdf8] px-1">
+                          {selectedPoint.price.toLocaleString()}円
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateSelectedPoint(selectedPoint.price + 20)
+                          }
+                          className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[11px] font-bold active:scale-95"
+                        >
+                          +20円
+                        </button>
+                      </div>
+                    </div>
+                    <input
+                      type="range"
+                      min={4600}
+                      max={5400}
+                      step={5}
+                      value={selectedPoint.price}
+                      onChange={(e) =>
+                        updateSelectedPoint(parseInt(e.target.value, 10))
+                      }
+                      className="w-full accent-[#38bdf8] cursor-pointer"
+                    />
+                  </div>
+
+                  {/* Direct Volume Control for Selected Point */}
+                  <div className="bg-slate-900/90 border border-slate-700 rounded-xl p-2.5 space-y-1.5">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-slate-300 font-bold">
+                        {selectedPoint.time} の出来高
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateSelectedPoint(
+                              undefined,
+                              Math.max(200, selectedPoint.volume - 500)
+                            )
+                          }
+                          className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-600 text-[11px] font-bold active:scale-95"
+                        >
+                          -500
+                        </button>
+                        <span className="font-mono font-extrabold text-amber-300 px-1">
+                          {selectedPoint.volume.toLocaleString()}株
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateSelectedPoint(
+                              undefined,
+                              selectedPoint.volume + 1000
+                            )
+                          }
+                          className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[11px] font-bold active:scale-95"
+                        >
+                          +大口
+                        </button>
+                      </div>
+                    </div>
+                    <input
+                      type="range"
+                      min={200}
+                      max={8000}
+                      step={100}
+                      value={selectedPoint.volume}
+                      onChange={(e) =>
+                        updateSelectedPoint(
+                          undefined,
+                          parseInt(e.target.value, 10)
+                        )
+                      }
+                      className="w-full accent-amber-400 cursor-pointer"
+                    />
+                  </div>
+                </div>
+
+                {/* Add Next Custom Bar Buttons ("自分で右側にチャートを描き足す") */}
+                <div className="flex items-center justify-between gap-1.5 pt-1">
+                  <span className="text-[11px] text-slate-400 font-bold">
+                    ✍️ 次の足を自分で追加：
+                  </span>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => handleAddNextBar(35, 1800)}
+                      className="px-2.5 py-1 rounded-lg bg-emerald-600/30 hover:bg-emerald-600/40 text-emerald-300 border border-emerald-500/50 text-[11px] font-extrabold flex items-center gap-1 active:scale-95 transition"
+                    >
+                      <TrendingUp className="w-3 h-3" />
+                      +上昇足を追加
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleAddNextBar(0, 800)}
+                      className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-600 text-[11px] font-bold flex items-center gap-1 active:scale-95 transition"
+                    >
+                      <Plus className="w-3 h-3" />
+                      横ばい足
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleAddNextBar(-35, 1800)}
+                      className="px-2.5 py-1 rounded-lg bg-rose-600/30 hover:bg-rose-600/40 text-rose-300 border border-rose-500/50 text-[11px] font-extrabold flex items-center gap-1 active:scale-95 transition"
+                    >
+                      <TrendingDown className="w-3 h-3" />
+                      -下落足を追加
+                    </button>
+                  </div>
+                </div>
               </div>
-              <input
-                type="range"
-                min={0.5}
-                max={2.0}
-                step={0.1}
-                value={volatilityMultiplier}
-                onChange={(e) =>
-                  setVolatilityMultiplier(parseFloat(e.target.value))
-                }
-                className="w-full accent-sky-400 cursor-pointer"
-              />
-              <div className="flex justify-between text-[10px] text-slate-500">
-                <span>0.5x (穏やか)</span>
-                <span>±2σバンド拡大</span>
-                <span>2.0x (高ボラ)</span>
+            )}
+          </div>
+
+          {/* 全体倍率スライダー（大口出来高の強さ & ボラティリティ） */}
+          {patternKey !== 'custom' && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 bg-[#0f172a] rounded-2xl p-3 border border-slate-700/90">
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-bold text-slate-300">
+                    🔥 節目の大口出来高倍率
+                  </span>
+                  <span className="font-extrabold text-amber-300 bg-amber-500/15 px-2 py-0.5 rounded-md border border-amber-500/30">
+                    {volumeMultiplier.toFixed(1)} 倍
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={1.0}
+                  max={5.0}
+                  step={0.5}
+                  value={volumeMultiplier}
+                  onChange={(e) =>
+                    setVolumeMultiplier(parseFloat(e.target.value))
+                  }
+                  className="w-full accent-amber-400 cursor-pointer"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-bold text-slate-300">
+                    ⚡ 値動きの荒さ（ボラ倍率）
+                  </span>
+                  <span className="font-extrabold text-sky-300 bg-sky-500/15 px-2 py-0.5 rounded-md border border-sky-500/30">
+                    {volatilityMultiplier.toFixed(1)} 倍
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0.5}
+                  max={2.0}
+                  step={0.1}
+                  value={volatilityMultiplier}
+                  onChange={(e) =>
+                    setVolatilityMultiplier(parseFloat(e.target.value))
+                  }
+                  className="w-full accent-sky-400 cursor-pointer"
+                />
               </div>
             </div>
-          </div>
+          )}
 
           {/* 3. Main Interactive Chart: Price + VWAP + ±1σ / ±2σ Bands */}
           <div className="bg-[#0f172a] rounded-2xl p-3 border border-slate-700/90 space-y-2">
             <div className="flex items-center justify-between flex-wrap gap-2">
               <span className="text-xs font-extrabold text-amber-300">
-                {currentPattern.title}
+                {activePatternMeta.title}
               </span>
-              <button
-                type="button"
-                onClick={() => setShow1Sigma(!show1Sigma)}
-                className={`px-2 py-0.5 rounded-md text-[10px] font-bold border transition ${
-                  show1Sigma
-                    ? 'bg-slate-700 text-slate-200 border-slate-500'
-                    : 'bg-slate-900 text-slate-500 border-slate-800'
-                }`}
-              >
-                ±1σバンド {show1Sigma ? '表示中' : '非表示'}
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setShowZoomBrush(!showZoomBrush)}
+                  className={`px-2 py-0.5 rounded-md text-[10px] font-bold border transition ${
+                    showZoomBrush
+                      ? 'bg-blue-600 text-white border-blue-400'
+                      : 'bg-slate-900 text-slate-400 border-slate-700'
+                  }`}
+                >
+                  区間ズームバー {showZoomBrush ? 'ON' : 'OFF'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShow1Sigma(!show1Sigma)}
+                  className={`px-2 py-0.5 rounded-md text-[10px] font-bold border transition ${
+                    show1Sigma
+                      ? 'bg-slate-700 text-slate-200 border-slate-500'
+                      : 'bg-slate-900 text-slate-500 border-slate-800'
+                  }`}
+                >
+                  ±1σ {show1Sigma ? '表示' : '非表示'}
+                </button>
+              </div>
             </div>
 
             {/* Legend */}
             <div className="flex flex-wrap items-center gap-3 text-[10px] font-bold text-slate-300">
               <span className="flex items-center gap-1 text-[#38bdf8]">
                 <span className="w-3 h-0.5 bg-[#38bdf8] inline-block" />
-                株価
+                株価（タップで選択可）
               </span>
               <span className="flex items-center gap-1 text-[#f59e0b]">
                 <span className="w-3 h-0.5 bg-[#f59e0b] inline-block" />
@@ -496,11 +837,20 @@ export const VwapBandSimulator: React.FC = () => {
             </div>
 
             {/* Price & VWAP Band Chart */}
-            <div className="h-60 w-full">
+            <div className="h-64 w-full">
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart
                   data={calculatedData}
                   margin={{ top: 10, right: 8, left: -12, bottom: 0 }}
+                  onClick={(state) => {
+                    if (
+                      state &&
+                      typeof state.activeTooltipIndex === 'number' &&
+                      state.activeTooltipIndex >= 0
+                    ) {
+                      setSelectedPointIndex(state.activeTooltipIndex)
+                    }
+                  }}
                 >
                   <CartesianGrid
                     strokeDasharray="3 3"
@@ -526,7 +876,7 @@ export const VwapBandSimulator: React.FC = () => {
                       return (
                         <div className="bg-slate-900/95 border border-slate-600 rounded-2xl p-3 text-xs shadow-2xl space-y-1">
                           <div className="font-extrabold text-white border-b border-slate-700 pb-1 flex items-center justify-between gap-3">
-                            <span>⏰ {d.time}</span>
+                            <span>⏰ {d.time}（タップでこの足を編集）</span>
                             {d.signalLabel && (
                               <span className="px-2 py-0.5 rounded-full bg-amber-400 text-slate-950 text-[10px] font-black">
                                 {d.signalLabel}
@@ -573,6 +923,14 @@ export const VwapBandSimulator: React.FC = () => {
                       )
                     }}
                   />
+                  {selectedPoint && (
+                    <ReferenceLine
+                      x={selectedPoint.time}
+                      stroke="#38bdf8"
+                      strokeDasharray="3 3"
+                      strokeWidth={1.5}
+                    />
+                  )}
                   <ReferenceLine
                     y={5000}
                     stroke="#475569"
@@ -633,7 +991,7 @@ export const VwapBandSimulator: React.FC = () => {
                     isAnimationActive={false}
                   />
 
-                  {/* Intraday Stock Price Line with Signal Dots */}
+                  {/* Intraday Stock Price Line with Interactive Dots */}
                   <Line
                     type="monotone"
                     dataKey="price"
@@ -646,19 +1004,33 @@ export const VwapBandSimulator: React.FC = () => {
                         cy?: number
                         payload?: CalculatedIntradayPoint
                       }
-                      if (!cx || !cy || !payload?.signalType) return <g key={payload?.time} />
-                      const color =
-                        payload.signalType === 'entry_buy'
-                          ? '#10b981'
-                          : payload.signalType === 'entry_sell'
-                          ? '#f43f5e'
-                          : '#f59e0b'
+                      if (!cx || !cy || !payload) return <g />
+                      const isSelectedDot = payload.index === activePointIndex
+                      if (!payload.signalType && !isSelectedDot) {
+                        return (
+                          <circle
+                            key={payload.time}
+                            cx={cx}
+                            cy={cy}
+                            r={3}
+                            fill="#38bdf8"
+                            fillOpacity={0.5}
+                          />
+                        )
+                      }
+                      const color = isSelectedDot
+                        ? '#38bdf8'
+                        : payload.signalType === 'entry_buy'
+                        ? '#10b981'
+                        : payload.signalType === 'entry_sell'
+                        ? '#f43f5e'
+                        : '#f59e0b'
                       return (
                         <circle
                           key={payload.time}
                           cx={cx}
                           cy={cy}
-                          r={6}
+                          r={isSelectedDot ? 7 : 5.5}
                           fill={color}
                           stroke="#ffffff"
                           strokeWidth={2}
@@ -666,16 +1038,25 @@ export const VwapBandSimulator: React.FC = () => {
                       )
                     }}
                   />
+
+                  {showZoomBrush && (
+                    <Brush
+                      dataKey="time"
+                      height={24}
+                      stroke="#38bdf8"
+                      fill="#0f172a"
+                    />
+                  )}
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
 
-            {/* Synchronized Volume Bar Chart (highlighting inflection volume spikes) */}
+            {/* Synchronized Volume Bar Chart */}
             <div className="pt-1 border-t border-slate-800">
               <div className="flex items-center justify-between text-[10px] text-slate-400 mb-1">
-                <span>📊 時間帯別 出来高推移</span>
+                <span>📊 時間帯別 出来高推移（棒をタップして選択可）</span>
                 <span className="text-amber-400 font-bold">
-                  ■オレンジ＝節目の大口出来高（スライダー連動）
+                  ■オレンジ＝大口出来高
                 </span>
               </div>
               <div className="h-20 w-full">
@@ -683,6 +1064,15 @@ export const VwapBandSimulator: React.FC = () => {
                   <BarChart
                     data={calculatedData}
                     margin={{ top: 2, right: 8, left: -12, bottom: 0 }}
+                    onClick={(state) => {
+                      if (
+                        state &&
+                        typeof state.activeTooltipIndex === 'number' &&
+                        state.activeTooltipIndex >= 0
+                      ) {
+                        setSelectedPointIndex(state.activeTooltipIndex)
+                      }
+                    }}
                   >
                     <XAxis dataKey="time" hide />
                     <YAxis
@@ -690,11 +1080,21 @@ export const VwapBandSimulator: React.FC = () => {
                       axisLine={false}
                       tickLine={false}
                     />
-                    <Bar dataKey="volume" radius={[3, 3, 0, 0]} isAnimationActive={false}>
+                    <Bar
+                      dataKey="volume"
+                      radius={[3, 3, 0, 0]}
+                      isAnimationActive={false}
+                    >
                       {calculatedData.map((entry) => (
                         <Cell
                           key={entry.time}
-                          fill={entry.isInflection ? '#f59e0b' : '#475569'}
+                          fill={
+                            entry.index === activePointIndex
+                              ? '#38bdf8'
+                              : entry.isInflection
+                              ? '#f59e0b'
+                              : '#475569'
+                          }
                         />
                       ))}
                     </Bar>
@@ -705,45 +1105,52 @@ export const VwapBandSimulator: React.FC = () => {
           </div>
 
           {/* Signal Timeline Badges */}
-          <div className="space-y-1.5">
-            <div className="text-xs font-extrabold text-slate-300 flex items-center gap-1.5">
-              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              チャート上の売買シグナル地点（丸印マーカー）
-            </div>
-            <div className="grid grid-cols-1 gap-1.5">
-              {signalPoints.map((sp) => (
-                <div
-                  key={sp.time}
-                  className="bg-[#0f172a] border border-slate-700 rounded-xl px-3 py-2 flex items-center justify-between text-xs"
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono font-bold text-slate-400">
-                      {sp.time}
-                    </span>
-                    <span
-                      className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${
-                        sp.signalType === 'entry_buy'
-                          ? 'bg-emerald-500/25 text-emerald-300 border border-emerald-500/40'
-                          : sp.signalType === 'entry_sell'
-                          ? 'bg-rose-500/25 text-rose-300 border border-rose-500/40'
-                          : 'bg-amber-500/25 text-amber-300 border border-amber-500/40'
-                      }`}
-                    >
-                      {sp.signalLabel}
-                    </span>
+          {signalPoints.length > 0 && (
+            <div className="space-y-1.5">
+              <div className="text-xs font-extrabold text-slate-300 flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                チャート上の売買シグナル地点（タップでその時刻を選択）
+              </div>
+              <div className="grid grid-cols-1 gap-1.5">
+                {signalPoints.map((sp) => (
+                  <div
+                    key={sp.time}
+                    onClick={() => setSelectedPointIndex(sp.index)}
+                    className={`bg-[#0f172a] border rounded-xl px-3 py-2 flex items-center justify-between text-xs cursor-pointer transition ${
+                      sp.index === activePointIndex
+                        ? 'border-sky-400 ring-1 ring-sky-400/40'
+                        : 'border-slate-700 hover:border-slate-500'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono font-bold text-slate-400">
+                        {sp.time}
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${
+                          sp.signalType === 'entry_buy'
+                            ? 'bg-emerald-500/25 text-emerald-300 border border-emerald-500/40'
+                            : sp.signalType === 'entry_sell'
+                            ? 'bg-rose-500/25 text-rose-300 border border-rose-500/40'
+                            : 'bg-amber-500/25 text-amber-300 border border-amber-500/40'
+                        }`}
+                      >
+                        {sp.signalLabel}
+                      </span>
+                    </div>
+                    <div className="text-right font-mono">
+                      <span className="font-extrabold text-white">
+                        株価 {sp.price.toLocaleString()}円
+                      </span>
+                      <span className="text-[11px] text-amber-300 ml-2">
+                        (VWAP {sp.vwapRounded.toLocaleString()}円)
+                      </span>
+                    </div>
                   </div>
-                  <div className="text-right font-mono">
-                    <span className="font-extrabold text-white">
-                      株価 {sp.price.toLocaleString()}円
-                    </span>
-                    <span className="text-[11px] text-amber-300 ml-2">
-                      (VWAP {sp.vwapRounded.toLocaleString()}円)
-                    </span>
-                  </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Entry / Take Profit / Stop Loss Rule Cards */}
           <div className="bg-[#0f172a] rounded-2xl p-3.5 border border-slate-700 space-y-2.5 text-xs">
@@ -753,7 +1160,9 @@ export const VwapBandSimulator: React.FC = () => {
                 <span className="font-extrabold text-emerald-300">
                   エントリー条件：
                 </span>
-                <span className="text-slate-200">{currentPattern.entryRule}</span>
+                <span className="text-slate-200">
+                  {activePatternMeta.entryRule}
+                </span>
               </div>
             </div>
             <div className="flex items-start gap-2">
@@ -763,7 +1172,7 @@ export const VwapBandSimulator: React.FC = () => {
                   利確ルール（±2σ活用）：
                 </span>
                 <span className="text-slate-200">
-                  {currentPattern.takeProfitRule}
+                  {activePatternMeta.takeProfitRule}
                 </span>
               </div>
             </div>
@@ -774,7 +1183,7 @@ export const VwapBandSimulator: React.FC = () => {
                   損切りルール：
                 </span>
                 <span className="text-slate-200">
-                  {currentPattern.stopLossRule}
+                  {activePatternMeta.stopLossRule}
                 </span>
               </div>
             </div>
