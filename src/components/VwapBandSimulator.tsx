@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Area,
   Bar,
   BarChart,
   CartesianGrid,
@@ -52,6 +53,15 @@ export interface CalculatedIntradayPoint extends IntradayBasePoint {
   lowerBand1Sigma: number
   upperBand2Sigma: number
   lowerBand2Sigma: number
+  upperBand3Sigma: number
+  lowerBand3Sigma: number
+  bandRange2Sigma: [number, number]
+  bandRange1Sigma: [number, number]
+  // Standard SMA Bollinger Bands (10-bar window for 15m bars)
+  bbMiddle: number
+  bbUpper2: number
+  bbLower2: number
+  bbRange2: [number, number]
   vwapDeviationRate: number
 }
 
@@ -72,7 +82,7 @@ export const INTRADAY_PATTERNS: Record<
     entryRule:
       '上昇後に調整し、VWAP付近まで下がって反発したポイント（10:15 / 13:15）で買いエントリー',
     takeProfitRule:
-      '直近高値ブレイク後、VWAP+2σバンド付近に到達して伸びが鈍化した局面で利確',
+      '直近高値ブレイク後、VWAP+2σ（ボリンジャー+2σ）バンド付近に到達して伸びが鈍化した局面で利確',
     stopLossRule:
       '出来高を伴ってVWAPを明確に下抜けし、数分以内にVWAP上へ復帰できない場合は即損切り',
     points: [
@@ -172,7 +182,7 @@ export const INTRADAY_PATTERNS: Record<
     entryRule:
       'VWAP下で推移中、自律反発でVWAPに接近して跳ね返されたポイント（10:15 / 13:30）で空売り（または買い玉の決済）',
     takeProfitRule:
-      'VWAP-2σバンド付近まで急落し、売られすぎ水準に達した局面で買い戻し利確',
+      'VWAP-2σ（ボリンジャー-2σ）バンド付近まで急落し、売られすぎ水準に達した局面で買い戻し利確',
     stopLossRule:
       '出来高を伴ってVWAPを上にブレイクし、5,000円台を回復した場合は踏み上げ回避のため即損切り',
     points: [
@@ -226,9 +236,11 @@ export const VwapBandSimulator: React.FC = () => {
   const [volumeMultiplier, setVolumeMultiplier] = useState<number>(2.0)
   const [volatilityMultiplier, setVolatilityMultiplier] = useState<number>(1.0)
   const [show1Sigma, setShow1Sigma] = useState<boolean>(true)
+  const [showBollingerOverlay, setShowBollingerOverlay] =
+    useState<boolean>(true)
 
   // Horizontal Click-and-Drag Pan & Zoom state
-  const [zoom, setZoom] = useState<number>(1.6) // Default 1.6x so user can immediately grab & drag left/right
+  const [zoom, setZoom] = useState<number>(1.6)
   const [panX, setPanX] = useState<number>(0)
   const [isDragging, setIsDragging] = useState<boolean>(false)
   const [viewportWidth, setViewportWidth] = useState<number>(340)
@@ -256,7 +268,6 @@ export const VwapBandSimulator: React.FC = () => {
   }, [viewMode])
 
   const canvasWidth = Math.max(viewportWidth, Math.round(viewportWidth * zoom))
-  // TradingView-style overscroll allowance so even at the edges (or 1.0x zoom) dragging always moves the chart
   const overscrollMargin = Math.round(viewportWidth * 0.25)
   const minPanX = -(canvasWidth - viewportWidth) - overscrollMargin
   const maxPanX = overscrollMargin
@@ -265,7 +276,6 @@ export const VwapBandSimulator: React.FC = () => {
     const clampedZoom = clamp(Number(nextZoom.toFixed(2)), 1.0, 3.5)
     const prevCanvasW = Math.max(viewportWidth, viewportWidth * zoom)
     const nextCanvasW = Math.max(viewportWidth, viewportWidth * clampedZoom)
-    // Keep center of viewport anchored while zooming
     const centerRatio = (viewportWidth / 2 - panX) / prevCanvasW
     const nextPan = Math.round(viewportWidth / 2 - centerRatio * nextCanvasW)
     const nextMinPan = -(nextCanvasW - viewportWidth) - overscrollMargin
@@ -273,7 +283,6 @@ export const VwapBandSimulator: React.FC = () => {
     setPanX(clamp(nextPan, nextMinPan, maxPanX))
   }
 
-  // Pointer Down / Move / Up handlers for smooth click-and-drag horizontal panning
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 && e.pointerType === 'mouse') return
     e.currentTarget.setPointerCapture(e.pointerId)
@@ -300,14 +309,13 @@ export const VwapBandSimulator: React.FC = () => {
       try {
         e.currentTarget.releasePointerCapture(e.pointerId)
       } catch {
-        // Ignore if not captured
+        // Ignore
       }
     }
     dragStartRef.current = null
     setIsDragging(false)
   }
 
-  // Support Mac trackpad 2-finger horizontal swipe as well
   const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
     if (Math.abs(e.deltaX) > Math.abs(e.deltaY) && Math.abs(e.deltaX) > 1) {
       e.preventDefault()
@@ -316,7 +324,7 @@ export const VwapBandSimulator: React.FC = () => {
   }
 
   // ============================================================================
-  // リアルタイムVWAP＆標準偏差バンド（±2σ）の算出ロジック
+  // リアルタイムVWAP＆標準偏差バンド（±2σ）＋移動平均ボリンジャーバンドの算出ロジック
   // ============================================================================
   const calculatedData = useMemo<CalculatedIntradayPoint[]>(() => {
     const basePoints = activePattern.points
@@ -326,6 +334,7 @@ export const VwapBandSimulator: React.FC = () => {
 
     let cumPV = 0
     let cumV = 0
+    const bbWindow = 8
 
     for (let k = 0; k < basePoints.length; k++) {
       const pt = basePoints[k]
@@ -355,12 +364,27 @@ export const VwapBandSimulator: React.FC = () => {
         weightedSquaredSum += adjustedVolumes[i] * (diff * diff)
       }
       const variance_k = weightedSquaredSum / cumV
-      const sigma_k = Math.sqrt(variance_k)
+      const sigma_k = Math.max(12, Math.sqrt(variance_k))
 
       const upperBand1Sigma = Math.round(VWAP_k + sigma_k)
       const lowerBand1Sigma = Math.round(VWAP_k - sigma_k)
       const upperBand2Sigma = Math.round(VWAP_k + 2 * sigma_k)
       const lowerBand2Sigma = Math.round(VWAP_k - 2 * sigma_k)
+      const upperBand3Sigma = Math.round(VWAP_k + 3 * sigma_k)
+      const lowerBand3Sigma = Math.round(VWAP_k - 3 * sigma_k)
+
+      // 5. 移動平均ボリンジャーバンド (SMA ± 2σ)
+      const startIdx = Math.max(0, k - bbWindow + 1)
+      const slice = adjustedPrices.slice(startIdx, k + 1)
+      const mean = slice.reduce((a, b) => a + b, 0) / slice.length
+      const bbVar =
+        slice.reduce((acc, val) => acc + (val - mean) * (val - mean), 0) /
+        slice.length
+      const bbStd = Math.max(12, Math.sqrt(bbVar))
+      const bbMiddle = Math.round(mean)
+      const bbUpper2 = Math.round(mean + 2 * bbStd)
+      const bbLower2 = Math.round(mean - 2 * bbStd)
+
       const vwapDeviationRate = Number(
         (((P_k - VWAP_k) / VWAP_k) * 100).toFixed(2)
       )
@@ -376,6 +400,14 @@ export const VwapBandSimulator: React.FC = () => {
         lowerBand1Sigma,
         upperBand2Sigma,
         lowerBand2Sigma,
+        upperBand3Sigma,
+        lowerBand3Sigma,
+        bandRange2Sigma: [lowerBand2Sigma, upperBand2Sigma],
+        bandRange1Sigma: [lowerBand1Sigma, upperBand1Sigma],
+        bbMiddle,
+        bbUpper2,
+        bbLower2,
+        bbRange2: [bbLower2, bbUpper2],
         vwapDeviationRate,
       })
     }
@@ -396,8 +428,12 @@ export const VwapBandSimulator: React.FC = () => {
     for (const d of calculatedData) {
       minVal = Math.min(minVal, d.price, d.lowerBand2Sigma)
       maxVal = Math.max(maxVal, d.price, d.upperBand2Sigma)
+      if (showBollingerOverlay) {
+        minVal = Math.min(minVal, d.bbLower2)
+        maxVal = Math.max(maxVal, d.bbUpper2)
+      }
     }
-    const pad = Math.max(20, Math.round((maxVal - minVal) * 0.1))
+    const pad = Math.max(20, Math.round((maxVal - minVal) * 0.08))
     const rawMin = Math.floor((minVal - pad) / 10) * 10
     const rawMax = Math.ceil((maxVal + pad) / 10) * 10
     const step = Math.max(10, Math.ceil((rawMax - rawMin) / 4 / 10) * 10)
@@ -412,7 +448,7 @@ export const VwapBandSimulator: React.FC = () => {
         rawMin,
       ],
     }
-  }, [calculatedData])
+  }, [calculatedData, showBollingerOverlay])
 
   const maxVolume = useMemo(() => {
     let m = 1000
@@ -427,7 +463,6 @@ export const VwapBandSimulator: React.FC = () => {
     [calculatedData]
   )
 
-  // Horizontal scroll progress indicator (0 to 1)
   const totalPanRange = Math.max(1, maxPanX - minPanX)
   const thumbWidthPct = clamp((viewportWidth / canvasWidth) * 100, 20, 90)
   const thumbLeftPct = clamp(
@@ -462,7 +497,7 @@ export const VwapBandSimulator: React.FC = () => {
           }`}
         >
           <Activity className="w-3.5 h-3.5 text-emerald-600" />
-          銘柄別VWAPチャート
+          銘柄別VWAP＆ボリンジャー
         </button>
       </div>
 
@@ -476,7 +511,7 @@ export const VwapBandSimulator: React.FC = () => {
               <div className="flex items-center gap-1.5">
                 <TrendingUp className="w-4 h-4 text-amber-400" />
                 <h2 className="text-sm sm:text-base font-extrabold text-white">
-                  日中VWAP ＆ 標準偏差（±2σ）バンド シミュレーター
+                  日中VWAP ＆ ボリンジャーバンド（±2σ）シミュレーター
                 </h2>
               </div>
               <p className="text-[11px] text-slate-400 mt-0.5">
@@ -532,7 +567,6 @@ export const VwapBandSimulator: React.FC = () => {
 
           {/* 2. インタラクティブ調整スライダー（2系統） */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-[#0f172a] rounded-2xl p-3.5 border border-slate-700/90">
-            {/* スライダー①：節目（反発・ブレイク時）の出来高倍率 */}
             <div className="space-y-1.5">
               <div className="flex items-center justify-between text-xs">
                 <span className="font-bold text-slate-300">
@@ -560,7 +594,6 @@ export const VwapBandSimulator: React.FC = () => {
               </div>
             </div>
 
-            {/* スライダー②：日中のボラティリティ（値動きの荒さ）倍率 */}
             <div className="space-y-1.5">
               <div className="flex items-center justify-between text-xs">
                 <span className="font-bold text-slate-300">
@@ -591,7 +624,7 @@ export const VwapBandSimulator: React.FC = () => {
 
           {/* 3. クリック＆ドラッグで左右に動かせるメイン＆サブ連動チャート */}
           <div className="bg-[#0f172a] rounded-2xl p-3 border border-slate-700/90 space-y-2.5">
-            {/* Chart Top Controls: Title + Zoom + ±1σ Toggle */}
+            {/* Chart Top Controls: Title + Zoom + Bollinger Toggle */}
             <div className="flex items-center justify-between flex-wrap gap-2">
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-xs font-extrabold text-amber-300">
@@ -603,7 +636,7 @@ export const VwapBandSimulator: React.FC = () => {
                 </span>
               </div>
 
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1.5 flex-wrap">
                 {/* Zoom buttons */}
                 <div className="inline-flex items-center bg-slate-900 rounded-lg p-0.5 border border-slate-700 text-[10px] font-bold">
                   <button
@@ -643,7 +676,7 @@ export const VwapBandSimulator: React.FC = () => {
                     type="button"
                     onClick={() => handleChangeZoom(2.4)}
                     className={`px-1.5 py-0.5 rounded ${
-                       zoom >= 2.2
+                      zoom >= 2.2
                         ? 'bg-blue-600 text-white'
                         : 'text-slate-400 hover:text-white'
                     }`}
@@ -659,6 +692,20 @@ export const VwapBandSimulator: React.FC = () => {
                     <ZoomIn className="w-3.5 h-3.5" />
                   </button>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    setShowBollingerOverlay(!showBollingerOverlay)
+                  }
+                  className={`px-2 py-1 rounded-lg text-[10px] font-extrabold border transition ${
+                    showBollingerOverlay
+                      ? 'bg-purple-600/30 text-purple-200 border-purple-400/60'
+                      : 'bg-slate-900 text-slate-500 border-slate-800'
+                  }`}
+                >
+                  ボリンジャー(BB) {showBollingerOverlay ? 'ON' : 'OFF'}
+                </button>
 
                 <button
                   type="button"
@@ -686,12 +733,18 @@ export const VwapBandSimulator: React.FC = () => {
               </span>
               <span className="flex items-center gap-1 text-rose-400">
                 <span className="w-3 h-0.5 border-b-2 border-dashed border-rose-400 inline-block" />
-                +2σ (利確・加熱)
+                VWAP+2σ
               </span>
               <span className="flex items-center gap-1 text-emerald-400">
                 <span className="w-3 h-0.5 border-b-2 border-dashed border-emerald-400 inline-block" />
-                -2σ (売られすぎ)
+                VWAP-2σ
               </span>
+              {showBollingerOverlay && (
+                <span className="flex items-center gap-1 text-purple-300">
+                  <span className="w-3 h-1.5 bg-purple-500/40 border border-purple-400 inline-block rounded-xs" />
+                  ボリンジャーバンド(SMA±2σ)
+                </span>
+              )}
             </div>
 
             {/* Interactive Click-and-Drag Chart Area (Pinned Y-Axis + Draggable Plot Canvas) */}
@@ -699,7 +752,6 @@ export const VwapBandSimulator: React.FC = () => {
               <div className="flex">
                 {/* Pinned Left Y-Axis Column (Price + Volume) */}
                 <div className="w-12 shrink-0 border-r border-slate-800/90 bg-[#0f172a]/95 z-10 select-none flex flex-col">
-                  {/* Top Chart Y-Axis Ticks (matches h-60 = 240px, top:10, bottom:22) */}
                   <div className="h-60 pt-[10px] pb-[22px] px-1.5 flex flex-col justify-between items-end text-[10px] font-mono text-slate-400">
                     {yTicks.map((t) => (
                       <span key={t} className="leading-none">
@@ -707,7 +759,6 @@ export const VwapBandSimulator: React.FC = () => {
                       </span>
                     ))}
                   </div>
-                  {/* Divider + Bottom Volume Y-Axis Label (matches h-24 = 96px) */}
                   <div className="h-24 border-t border-slate-800/80 pt-1.5 pb-4 px-1.5 flex flex-col justify-between items-end text-[9px] font-mono text-slate-500">
                     <span>{maxVolume}</span>
                     <span>出来高</span>
@@ -734,7 +785,7 @@ export const VwapBandSimulator: React.FC = () => {
                     }}
                     className="will-change-transform"
                   >
-                    {/* Upper Main Chart: Price + VWAP + ±1σ / ±2σ Bands */}
+                    {/* Upper Main Chart: Price + VWAP + ±1σ / ±2σ Bands + Bollinger Ribbon */}
                     <div className="h-60 w-full">
                       <ResponsiveContainer width="100%" height="100%">
                         <ComposedChart
@@ -753,11 +804,7 @@ export const VwapBandSimulator: React.FC = () => {
                             axisLine={false}
                             tickLine={false}
                           />
-                          <YAxis
-                            domain={yDomain}
-                            ticks={yTicks}
-                            hide
-                          />
+                          <YAxis domain={yDomain} ticks={yTicks} hide />
                           <Tooltip
                             content={({ active, payload }) => {
                               if (
@@ -771,7 +818,7 @@ export const VwapBandSimulator: React.FC = () => {
                               const pt =
                                 payload[0].payload as CalculatedIntradayPoint
                               return (
-                                <div className="bg-slate-900/95 border border-slate-600 rounded-xl p-2.5 text-xs shadow-xl space-y-1 min-w-[205px]">
+                                <div className="bg-slate-900/95 border border-slate-600 rounded-xl p-2.5 text-xs shadow-xl space-y-1 min-w-[215px]">
                                   <div className="flex items-center justify-between border-b border-slate-700 pb-1">
                                     <span className="font-extrabold text-white">
                                       ⏰ {pt.time}
@@ -815,27 +862,26 @@ export const VwapBandSimulator: React.FC = () => {
                                   </div>
                                   <div className="border-t border-slate-800 pt-1 mt-1 space-y-0.5 text-[11px]">
                                     <div className="flex justify-between text-rose-300">
-                                      <span>+2σ (加熱上限)：</span>
+                                      <span>VWAP +2σ：</span>
                                       <span className="font-mono font-bold">
                                         {pt.upperBand2Sigma.toLocaleString()}円
                                       </span>
                                     </div>
-                                    {show1Sigma && (
-                                      <div className="flex justify-between text-slate-400">
-                                        <span>±1σ バンド：</span>
-                                        <span className="font-mono">
-                                          {pt.lowerBand1Sigma.toLocaleString()}{'`'}{' '}
-                                          〜{' '}
-                                          {pt.upperBand1Sigma.toLocaleString()}円
-                                        </span>
-                                      </div>
-                                    )}
                                     <div className="flex justify-between text-emerald-300">
-                                      <span>-2σ (売られすぎ)：</span>
+                                      <span>VWAP -2σ：</span>
                                       <span className="font-mono font-bold">
                                         {pt.lowerBand2Sigma.toLocaleString()}円
                                       </span>
                                     </div>
+                                    {showBollingerOverlay && (
+                                      <div className="flex justify-between text-purple-300">
+                                        <span>ボリンジャー±2σ：</span>
+                                        <span className="font-mono font-bold">
+                                          {pt.bbLower2.toLocaleString()} 〜{' '}
+                                          {pt.bbUpper2.toLocaleString()}円
+                                        </span>
+                                      </div>
+                                    )}
                                     <div className="flex justify-between text-amber-200/90 pt-0.5">
                                       <span>出来高：</span>
                                       <span className="font-mono font-bold">
@@ -847,6 +893,66 @@ export const VwapBandSimulator: React.FC = () => {
                               )
                             }}
                           />
+
+                          {/* Shaded Ribbon Fill for VWAP ±2σ and ±1σ */}
+                          <Area
+                            type="monotone"
+                            dataKey="bandRange2Sigma"
+                            stroke="none"
+                            fill="#38bdf8"
+                            fillOpacity={0.06}
+                            isAnimationActive={false}
+                          />
+                          {show1Sigma && (
+                            <Area
+                              type="monotone"
+                              dataKey="bandRange1Sigma"
+                              stroke="none"
+                              fill="#38bdf8"
+                              fillOpacity={0.09}
+                              isAnimationActive={false}
+                            />
+                          )}
+
+                          {/* Standard Bollinger Band Ribbon (SMA ± 2σ) */}
+                          {showBollingerOverlay && (
+                            <>
+                              <Area
+                                type="monotone"
+                                dataKey="bbRange2"
+                                stroke="none"
+                                fill="#a855f7"
+                                fillOpacity={0.12}
+                                isAnimationActive={false}
+                              />
+                              <Line
+                                type="monotone"
+                                dataKey="bbUpper2"
+                                stroke="#c084fc"
+                                strokeWidth={1.3}
+                                strokeDasharray="2 2"
+                                dot={false}
+                                isAnimationActive={false}
+                              />
+                              <Line
+                                type="monotone"
+                                dataKey="bbMiddle"
+                                stroke="#a855f7"
+                                strokeWidth={1.2}
+                                dot={false}
+                                isAnimationActive={false}
+                              />
+                              <Line
+                                type="monotone"
+                                dataKey="bbLower2"
+                                stroke="#c084fc"
+                                strokeWidth={1.3}
+                                strokeDasharray="2 2"
+                                dot={false}
+                                isAnimationActive={false}
+                              />
+                            </>
+                          )}
 
                           {/* Vertical reference lines on key signal points */}
                           {signalPoints.map((sp) => (
@@ -1006,7 +1112,11 @@ export const VwapBandSimulator: React.FC = () => {
                             tickLine={false}
                           />
                           <YAxis domain={[0, maxVolume]} hide />
-                          <Bar dataKey="volume" radius={[3, 3, 0, 0]} isAnimationActive={false}>
+                          <Bar
+                            dataKey="volume"
+                            radius={[3, 3, 0, 0]}
+                            isAnimationActive={false}
+                          >
                             {calculatedData.map((entry) => (
                               <Cell
                                 key={entry.time}
@@ -1073,7 +1183,7 @@ export const VwapBandSimulator: React.FC = () => {
           <div className="bg-[#0f172a] rounded-2xl p-3.5 border border-slate-700/80 space-y-2">
             <div className="flex items-center gap-1.5 text-xs font-extrabold text-sky-300">
               <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
-              なぜVWAPと±2σバンドで反発・利確が起きるのか？
+              なぜVWAPとボリンジャーバンド（±2σ）を重ねて見るのか？
             </div>
             <ul className="text-[11px] text-slate-300 space-y-1.5 leading-relaxed list-disc pl-4">
               <li>
@@ -1084,9 +1194,9 @@ export const VwapBandSimulator: React.FC = () => {
               </li>
               <li>
                 <strong className="text-white">
-                  ±2σ（標準偏差バンド）は統計的な過熱サイン：
+                  ボリンジャーバンド（±1σ / ±2σ / ±3σ）のスクイーズ＆エクスパンション：
                 </strong>
-                出来高加重の±2σバンドに到達した局面は、日中の平均コスト（VWAP）から統計的に大きく乖離した「買われすぎ・売られすぎ」状態であり、アルゴの利確売りや逆張り注文が集中しやすくなります。
+                バンド幅が狭まった状態（スクイーズ）から出来高を伴ってVWAPや+2σを上抜けると強いトレンド（バンドウォーク）が発生しやすく、逆に急騰後に+2σ〜+3σへ到達して失速した箇所は格好の利確目安になります。
               </li>
             </ul>
           </div>
