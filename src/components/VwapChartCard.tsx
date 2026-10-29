@@ -1,7 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Area,
+  Bar,
+  BarChart,
   CartesianGrid,
+  Cell,
   ComposedChart,
   Line,
   ReferenceLine,
@@ -14,7 +17,6 @@ import {
   Activity,
   ArrowDownRight,
   ArrowUpRight,
-  Layers,
   MoveHorizontal,
   RefreshCw,
   Search,
@@ -30,32 +32,28 @@ export interface VwapDataPoint {
   timestamp: number
   price: number
   vwap: number
+  vwapRounded: number
   volume: number
   cumVolume: number
-  // Bollinger Bands (SMA-based, window up to 20)
+  isInflection?: boolean
+  signalLabel?: string
+  signalType?: 'entry_buy' | 'entry_sell' | 'take_profit'
+  vwapDeviationRate: number
+  // VWAP ±1σ / ±2σ Bands (Volume-weighted around cumulative VWAP)
+  vwapSigma: number
+  upperBand1Sigma: number
+  lowerBand1Sigma: number
+  upperBand2Sigma: number
+  lowerBand2Sigma: number
+  bandRange2Sigma: [number, number]
+  bandRange1Sigma: [number, number]
+  // Standard Bollinger Bands (SMA ± 2σ)
   bbMiddle: number
-  bbUpper1: number
-  bbLower1: number
   bbUpper2: number
   bbLower2: number
-  bbUpper3: number
-  bbLower3: number
   bbSigma: number
   bbRange2: [number, number]
-  bbRange1: [number, number]
-  // VWAP Bollinger Bands (Volume-weighted around cumulative VWAP)
-  vwapUpper1: number
-  vwapLower1: number
-  vwapUpper2: number
-  vwapLower2: number
-  vwapUpper3: number
-  vwapLower3: number
-  vwapSigma: number
-  vwapRange2: [number, number]
-  vwapRange1: [number, number]
 }
-
-export type BandMode = 'bollinger' | 'vwap_band' | 'off'
 
 interface PresetTicker {
   code: string
@@ -91,51 +89,49 @@ interface RawPoint {
   volume: number
 }
 
-// Compute cumulative VWAP + SMA Bollinger Bands (±1σ, ±2σ, ±3σ) + VWAP Bands (±1σ, ±2σ, ±3σ)
+// Compute cumulative VWAP + VWAP ±1σ/±2σ Bands + SMA Bollinger Bands + Auto Signal Detection
 function enrichWithVwapAndBollinger(
   rawPoints: RawPoint[],
-  bbPeriod = 20
+  bbPeriod = 8
 ): VwapDataPoint[] {
   let cumPV = 0
   let cumVol = 0
+  const avgVol =
+    rawPoints.reduce((acc, p) => acc + (p.volume || 1000), 0) /
+    Math.max(1, rawPoints.length)
+
   const result: VwapDataPoint[] = []
 
   for (let i = 0; i < rawPoints.length; i++) {
     const pt = rawPoints[i]
-    const v = Math.max(0, pt.volume)
+    const v = Math.max(100, pt.volume || 1000)
 
-    if (v > 0) {
-      cumPV += pt.typicalPrice * v
-      cumVol += v
-    } else if (cumVol === 0) {
-      cumPV = pt.price
-      cumVol = 1
-    }
+    cumPV += pt.typicalPrice * v
+    cumVol += v
 
     const vwapRaw = cumVol > 0 ? cumPV / cumVol : pt.price
     const vwap = Math.round(vwapRaw * 10) / 10
+    const vwapRounded = Math.round(vwapRaw)
 
     // 1. Volume-weighted standard deviation around VWAP
     let weightedSqSum = 0
     for (let j = 0; j <= i; j++) {
-      const w = Math.max(1, rawPoints[j].volume)
+      const w = Math.max(100, rawPoints[j].volume || 1000)
       const diff = rawPoints[j].price - vwapRaw
       weightedSqSum += w * diff * diff
     }
     const vwapVariance = cumVol > 0 ? weightedSqSum / cumVol : 0
     const vwapSigmaRaw = Math.max(
-      pt.price * 0.0015,
+      pt.price * 0.0025,
       Math.sqrt(vwapVariance)
     )
     const vwapSigma = Math.round(vwapSigmaRaw * 10) / 10
-    const vwapUpper1 = Math.round((vwapRaw + vwapSigmaRaw) * 10) / 10
-    const vwapLower1 = Math.round((vwapRaw - vwapSigmaRaw) * 10) / 10
-    const vwapUpper2 = Math.round((vwapRaw + 2 * vwapSigmaRaw) * 10) / 10
-    const vwapLower2 = Math.round((vwapRaw - 2 * vwapSigmaRaw) * 10) / 10
-    const vwapUpper3 = Math.round((vwapRaw + 3 * vwapSigmaRaw) * 10) / 10
-    const vwapLower3 = Math.round((vwapRaw - 3 * vwapSigmaRaw) * 10) / 10
+    const upperBand1Sigma = Math.round(vwapRaw + vwapSigmaRaw)
+    const lowerBand1Sigma = Math.round(vwapRaw - vwapSigmaRaw)
+    const upperBand2Sigma = Math.round(vwapRaw + 2 * vwapSigmaRaw)
+    const lowerBand2Sigma = Math.round(vwapRaw - 2 * vwapSigmaRaw)
 
-    // 2. Standard Bollinger Bands (SMA + standard deviation over up to `bbPeriod` bars)
+    // 2. Standard Bollinger Bands (SMA ± 2σ)
     const startIdx = Math.max(0, i - bbPeriod + 1)
     const windowSlice = rawPoints.slice(startIdx, i + 1)
     const mean =
@@ -146,52 +142,104 @@ function enrichWithVwapAndBollinger(
         const d = cur.price - mean
         return acc + d * d
       }, 0) / windowSlice.length
-    const bbSigmaRaw = Math.max(pt.price * 0.0015, Math.sqrt(variance))
+    const bbSigmaRaw = Math.max(pt.price * 0.0025, Math.sqrt(variance))
     const bbSigma = Math.round(bbSigmaRaw * 10) / 10
-    const bbMiddle = Math.round(mean * 10) / 10
-    const bbUpper1 = Math.round((mean + bbSigmaRaw) * 10) / 10
-    const bbLower1 = Math.round((mean - bbSigmaRaw) * 10) / 10
-    const bbUpper2 = Math.round((mean + 2 * bbSigmaRaw) * 10) / 10
-    const bbLower2 = Math.round((mean - 2 * bbSigmaRaw) * 10) / 10
-    const bbUpper3 = Math.round((mean + 3 * bbSigmaRaw) * 10) / 10
-    const bbLower3 = Math.round((mean - 3 * bbSigmaRaw) * 10) / 10
+    const bbMiddle = Math.round(mean)
+    const bbUpper2 = Math.round(mean + 2 * bbSigmaRaw)
+    const bbLower2 = Math.round(mean - 2 * bbSigmaRaw)
+
+    const vwapDeviationRate = Number(
+      (((pt.price - vwapRaw) / vwapRaw) * 100).toFixed(2)
+    )
+
+    const isInflection = i === 0 || v >= avgVol * 1.25
 
     result.push({
       time: pt.time,
       timestamp: pt.timestamp,
       price: Math.round(pt.price * 10) / 10,
       vwap,
-      volume: v || 1000,
+      vwapRounded,
+      volume: Math.round(v),
       cumVolume: cumVol,
+      isInflection,
+      vwapDeviationRate,
+      vwapSigma,
+      upperBand1Sigma,
+      lowerBand1Sigma,
+      upperBand2Sigma,
+      lowerBand2Sigma,
+      bandRange2Sigma: [lowerBand2Sigma, upperBand2Sigma],
+      bandRange1Sigma: [lowerBand1Sigma, upperBand1Sigma],
       bbMiddle,
-      bbUpper1,
-      bbLower1,
       bbUpper2,
       bbLower2,
-      bbUpper3,
-      bbLower3,
       bbSigma,
       bbRange2: [bbLower2, bbUpper2],
-      bbRange1: [bbLower1, bbUpper1],
-      vwapUpper1,
-      vwapLower1,
-      vwapUpper2,
-      vwapLower2,
-      vwapUpper3,
-      vwapLower3,
-      vwapSigma,
-      vwapRange2: [vwapLower2, vwapUpper2],
-      vwapRange1: [vwapLower1, vwapUpper1],
     })
+  }
+
+  // Automatically annotate 2 key intraday points (1. VWAP bounce/cross entry, 2. ±2σ target)
+  // so the chart looks and reads just like the Chart Learning simulator!
+  if (result.length >= 6) {
+    let bestEntryIdx = -1
+    let minAbsDiff = Infinity
+    const searchStart = Math.max(2, Math.floor(result.length * 0.2))
+    const searchEnd = Math.floor(result.length * 0.72)
+
+    for (let i = searchStart; i <= searchEnd; i++) {
+      const cur = result[i]
+      const next = result[i + 1]
+      const prev = result[i - 1]
+      if (!next || !prev) continue
+      const dist = Math.abs(cur.price - cur.vwap)
+      // Look for pullback bounce near VWAP or upward crossover
+      if (next.price > cur.price && dist < minAbsDiff) {
+        minAbsDiff = dist
+        bestEntryIdx = i
+      }
+    }
+
+    if (bestEntryIdx !== -1) {
+      const pt = result[bestEntryIdx]
+      pt.isInflection = true
+      pt.signalType = pt.price >= pt.vwap ? 'entry_buy' : 'entry_sell'
+      pt.signalLabel =
+        pt.price >= pt.vwap ? 'VWAP押し目反発' : 'VWAPクロス注目'
+    }
+
+    // Find peak deviation point in the latter half for ±2σ target marker
+    let bestTargetIdx = -1
+    let maxDev = -Infinity
+    const targetStart = Math.max(
+      bestEntryIdx + 2,
+      Math.floor(result.length * 0.6)
+    )
+    for (let i = targetStart; i < result.length; i++) {
+      const dev = Math.abs(result[i].price - result[i].vwap)
+      if (dev > maxDev) {
+        maxDev = dev
+        bestTargetIdx = i
+      }
+    }
+
+    if (bestTargetIdx !== -1 && bestTargetIdx !== bestEntryIdx) {
+      const pt = result[bestTargetIdx]
+      pt.isInflection = true
+      pt.signalType = 'take_profit'
+      pt.signalLabel =
+        pt.price >= pt.vwap ? '+2σ利確目安' : '-2σ反発目安'
+    }
   }
 
   return result
 }
 
-// Generate full Tokyo Stock Exchange trading session: 前場 09:00〜11:30 + 後場 12:30〜15:30 (68 points)
+// Generate full Tokyo Stock Exchange trading session (09:00〜15:30) matching the Chart Learning style
 function generateSimulatedSession(
   basePrice: number,
-  codeSeedStr = '7011'
+  codeSeedStr = '7011',
+  intervalType: '15m' | '5m' | '1m' = '15m'
 ): VwapDataPoint[] {
   const rawPoints: RawPoint[] = []
   let currentPrice = basePrice
@@ -201,35 +249,83 @@ function generateSimulatedSession(
       .split('')
       .reduce((acc, ch, idx) => acc + ch.charCodeAt(0) * (idx + 1), 0) || 7011
 
-  // Build exact TSE 5-minute time slots from 09:00 to 15:30 (skipping 11:35〜12:25 lunch break)
-  const timeSlots: string[] = []
-  // Morning session (前場): 09:00 -> 11:30
-  for (let m = 9 * 60; m <= 11 * 60 + 30; m += 5) {
-    const hh = String(Math.floor(m / 60)).padStart(2, '0')
-    const mm = String(m % 60).padStart(2, '0')
-    timeSlots.push(`${hh}:${mm}`)
-  }
-  // Afternoon session (後場): 12:30 -> 15:30
-  for (let m = 12 * 60 + 30; m <= 15 * 60 + 30; m += 5) {
-    const hh = String(Math.floor(m / 60)).padStart(2, '0')
-    const mm = String(m % 60).padStart(2, '0')
-    timeSlots.push(`${hh}:${mm}`)
-  }
+  // Exact 18 intraday time points for 15m mode (matching VwapBandSimulator!) or 5m slots
+  const timeSlots: string[] =
+    intervalType === '15m'
+      ? [
+          '09:00',
+          '09:15',
+          '09:30',
+          '09:45',
+          '10:00',
+          '10:15',
+          '10:30',
+          '10:45',
+          '11:00',
+          '11:30',
+          '12:30',
+          '13:00',
+          '13:15',
+          '13:45',
+          '14:15',
+          '14:45',
+          '15:00',
+          '15:30',
+        ]
+      : (() => {
+          const slots: string[] = []
+          const step = intervalType === '1m' ? 2 : 5
+          for (let m = 9 * 60; m <= 11 * 60 + 30; m += step) {
+            slots.push(
+              `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(
+                m % 60
+              ).padStart(2, '0')}`
+            )
+          }
+          for (let m = 12 * 60 + 30; m <= 15 * 60 + 30; m += step) {
+            slots.push(
+              `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(
+                m % 60
+              ).padStart(2, '0')}`
+            )
+          }
+          return slots
+        })()
+
+  // Realistic intraday trend curve (opening surge -> mid-morning pullback to VWAP -> afternoon breakout toward +2σ)
+  const patternMultipliers = [
+    0.0, 0.011, 0.021, 0.024, 0.016, 0.012, 0.022, 0.029, 0.033, 0.036,
+    0.03, 0.025, 0.022, 0.032, 0.039, 0.045, 0.049, 0.047,
+  ]
+  const direction = numericSeed % 3 === 0 ? -1 : 1
 
   for (let i = 0; i < timeSlots.length; i++) {
     const timeStr = timeSlots[i]
-    const wave = Math.sin((i + (numericSeed % 5)) / 5.5) * (basePrice * 0.005)
-    const n = (seededNoise(numericSeed, i) - 0.47) * (basePrice * 0.004)
+    const progress = i / Math.max(1, timeSlots.length - 1)
+    const patIdx = Math.min(
+      patternMultipliers.length - 1,
+      Math.floor(progress * patternMultipliers.length)
+    )
+    const trendOffset =
+      basePrice * patternMultipliers[patIdx] * direction
+    const microWave =
+      (seededNoise(numericSeed, i) - 0.48) * (basePrice * 0.004)
+
     currentPrice = Math.max(
       10,
-      Math.round(basePrice + wave + n * Math.sqrt(i + 1))
+      Math.round(basePrice + trendOffset + microWave)
     )
 
-    const isOpeningOrClosing = i < 4 || i > timeSlots.length - 5
+    const isKeyBar =
+      i === 0 ||
+      i === 5 ||
+      i === 12 ||
+      i === timeSlots.length - 2 ||
+      i === timeSlots.length - 1
     const vol =
       Math.round(
-        (300 + seededNoise(numericSeed + 7, i) * 900) *
-          (isOpeningOrClosing ? 2.0 : 1)
+        (600 + seededNoise(numericSeed + 7, i) * 700) *
+          (isKeyBar ? 1.75 : 1.0)
       ) * 100
 
     rawPoints.push({
@@ -241,7 +337,7 @@ function generateSimulatedSession(
     })
   }
 
-  return enrichWithVwapAndBollinger(rawPoints, 20)
+  return enrichWithVwapAndBollinger(rawPoints, 8)
 }
 
 export const VwapChartCard: React.FC = () => {
@@ -250,19 +346,18 @@ export const VwapChartCard: React.FC = () => {
   const [selectedCode, setSelectedCode] = useState('7011')
   const [selectedName, setSelectedName] = useState('三菱重工')
   const [codeInput, setCodeInput] = useState('7011')
-  const [interval, setIntervalType] = useState<'1m' | '5m'>('5m')
+  const [interval, setIntervalType] = useState<'15m' | '5m' | '1m'>('15m')
   const [isLoading, setIsLoading] = useState(false)
   const [dataSourceLabel, setDataSourceLabel] = useState<string>('自動更新OFF')
   const [prevClose, setPrevClose] = useState<number | null>(null)
   const [chartData, setChartData] = useState<VwapDataPoint[]>([])
 
-  // Bollinger Band display settings
-  const [bandMode, setBandMode] = useState<BandMode>('bollinger')
-  const [show3Sigma, setShow3Sigma] = useState<boolean>(false)
+  // Same toggle options as VwapBandSimulator ("VWAP±2σ チャート学習")
+  const [showBollingerOverlay, setShowBollingerOverlay] =
+    useState<boolean>(true)
+  const [show1Sigma, setShow1Sigma] = useState<boolean>(true)
 
   // Horizontal Click-and-Drag Pan & Zoom state
-  // Default zoom = 1.0 so the entire 09:00〜15:30 day is visible immediately without cutting off at 13:25,
-  // while still allowing free horizontal click-and-drag panning!
   const [zoom, setZoom] = useState<number>(1.0)
   const [panX, setPanX] = useState<number>(0)
   const [isDragging, setIsDragging] = useState<boolean>(false)
@@ -289,13 +384,12 @@ export const VwapChartCard: React.FC = () => {
   }, [])
 
   const canvasWidth = Math.max(viewportWidth, Math.round(viewportWidth * zoom))
-  // Allow generous horizontal drag (45% of viewport width left/right) even at 1.0x zoom!
   const overscrollMargin = Math.round(viewportWidth * 0.45)
   const minPanX = -(canvasWidth - viewportWidth) - overscrollMargin
   const maxPanX = overscrollMargin
 
   const handleChangeZoom = (nextZoom: number) => {
-    const clampedZoom = clamp(Number(nextZoom.toFixed(2)), 1.0, 4.0)
+    const clampedZoom = clamp(Number(nextZoom.toFixed(2)), 1.0, 3.5)
     const prevCanvasW = Math.max(viewportWidth, viewportWidth * zoom)
     const nextCanvasW = Math.max(viewportWidth, viewportWidth * clampedZoom)
     const centerRatio = (viewportWidth / 2 - panX) / prevCanvasW
@@ -440,7 +534,7 @@ export const VwapChartCard: React.FC = () => {
       if (rawPoints.length === 0) return null
 
       return {
-        points: enrichWithVwapAndBollinger(rawPoints, 20),
+        points: enrichWithVwapAndBollinger(rawPoints, 8),
         previousClose:
           res.meta?.chartPreviousClose ?? res.meta?.previousClose ?? null,
         shortName: res.meta?.shortName,
@@ -452,7 +546,7 @@ export const VwapChartCard: React.FC = () => {
 
   // Only fetches when explicitly requested (ticker change, interval change, or manual refresh button)
   const fetchIntradayData = useCallback(
-    async (codeToFetch: string, intervalToFetch: '1m' | '5m') => {
+    async (codeToFetch: string, intervalToFetch: '15m' | '5m' | '1m') => {
       setIsLoading(true)
       const cleanCode = codeToFetch.trim().toUpperCase()
       const yahooSym =
@@ -521,7 +615,7 @@ export const VwapChartCard: React.FC = () => {
       } catch {
         const matched = tickerListRef.current.find((t) => t.code === cleanCode)
         const base = matched?.basePrice || 2000
-        const sim = generateSimulatedSession(base, cleanCode)
+        const sim = generateSimulatedSession(base, cleanCode, intervalToFetch)
         setChartData(sim)
         setPrevClose(base)
         setPanX(0)
@@ -546,30 +640,14 @@ export const VwapChartCard: React.FC = () => {
     currentVwap > 0 ? (vwapDiff / currentVwap) * 100 : 0
   const isAboveVwap = vwapDiff >= 0
 
-  // Active band values on latest point for summary display
-  const activeUpper2 = latestPoint
-    ? bandMode === 'vwap_band'
-      ? latestPoint.vwapUpper2
-      : latestPoint.bbUpper2
-    : 0
-  const activeLower2 = latestPoint
-    ? bandMode === 'vwap_band'
-      ? latestPoint.vwapLower2
-      : latestPoint.bbLower2
-    : 0
+  const activeUpper2 = latestPoint ? latestPoint.upperBand2Sigma : 0
+  const activeLower2 = latestPoint ? latestPoint.lowerBand2Sigma : 0
   const activeSigmaScore = useMemo(() => {
-    if (!latestPoint) return 0
-    if (bandMode === 'vwap_band') {
-      return latestPoint.vwapSigma > 0
-        ? (latestPoint.price - latestPoint.vwap) / latestPoint.vwapSigma
-        : 0
-    }
-    return latestPoint.bbSigma > 0
-      ? (latestPoint.price - latestPoint.bbMiddle) / latestPoint.bbSigma
-      : 0
-  }, [latestPoint, bandMode])
+    if (!latestPoint || latestPoint.vwapSigma <= 0) return 0
+    return (latestPoint.price - latestPoint.vwap) / latestPoint.vwapSigma
+  }, [latestPoint])
 
-  // Compute 5 evenly spaced Y-axis ticks including Bollinger Bands so nothing gets clipped
+  // Compute 5 evenly spaced Y-axis ticks with generous top headroom so labels/lines never clip
   const { yDomain, yTicks } = useMemo(() => {
     if (chartData.length === 0) {
       return {
@@ -580,23 +658,22 @@ export const VwapChartCard: React.FC = () => {
     let minVal = Infinity
     let maxVal = -Infinity
     for (const pt of chartData) {
-      minVal = Math.min(minVal, pt.price, pt.vwap)
-      maxVal = Math.max(maxVal, pt.price, pt.vwap)
-      if (bandMode === 'bollinger') {
-        minVal = Math.min(minVal, show3Sigma ? pt.bbLower3 : pt.bbLower2)
-        maxVal = Math.max(maxVal, show3Sigma ? pt.bbUpper3 : pt.bbUpper2)
-      } else if (bandMode === 'vwap_band') {
-        minVal = Math.min(minVal, show3Sigma ? pt.vwapLower3 : pt.vwapLower2)
-        maxVal = Math.max(maxVal, show3Sigma ? pt.vwapUpper3 : pt.vwapUpper2)
+      minVal = Math.min(minVal, pt.price, pt.lowerBand2Sigma)
+      maxVal = Math.max(maxVal, pt.price, pt.upperBand2Sigma)
+      if (showBollingerOverlay) {
+        minVal = Math.min(minVal, pt.bbLower2)
+        maxVal = Math.max(maxVal, pt.bbUpper2)
       }
     }
     if (prevClose && Number.isFinite(prevClose)) {
       minVal = Math.min(minVal, prevClose)
       maxVal = Math.max(maxVal, prevClose)
     }
-    const pad = Math.max(2, Math.round((maxVal - minVal) * 0.08))
-    const rawMin = Math.floor(minVal - pad)
-    const rawMax = Math.ceil(maxVal + pad)
+    const range = Math.max(10, maxVal - minVal)
+    const bottomPad = Math.max(4, Math.round(range * 0.12))
+    const topPad = Math.max(8, Math.round(range * 0.2))
+    const rawMin = Math.floor(minVal - bottomPad)
+    const rawMax = Math.ceil(maxVal + topPad)
     const step = Math.max(1, Math.ceil((rawMax - rawMin) / 4))
     const finalMax = rawMin + step * 4
     return {
@@ -609,7 +686,20 @@ export const VwapChartCard: React.FC = () => {
         rawMin,
       ],
     }
-  }, [chartData, prevClose, bandMode, show3Sigma])
+  }, [chartData, prevClose, showBollingerOverlay])
+
+  const maxVolume = useMemo(() => {
+    let m = 1000
+    for (const d of chartData) {
+      if (d.volume > m) m = d.volume
+    }
+    return Math.ceil(m / 500) * 500
+  }, [chartData])
+
+  const signalPoints = useMemo(
+    () => chartData.filter((d) => Boolean(d.signalLabel)),
+    [chartData]
+  )
 
   const totalPanRange = Math.max(1, maxPanX - minPanX)
   const thumbWidthPct = clamp((viewportWidth / canvasWidth) * 100, 18, 90)
@@ -652,16 +742,6 @@ export const VwapChartCard: React.FC = () => {
     )
   }
 
-  // Data keys based on selected band mode
-  const range2Key = bandMode === 'vwap_band' ? 'vwapRange2' : 'bbRange2'
-  const range1Key = bandMode === 'vwap_band' ? 'vwapRange1' : 'bbRange1'
-  const upper3Key = bandMode === 'vwap_band' ? 'vwapUpper3' : 'bbUpper3'
-  const lower3Key = bandMode === 'vwap_band' ? 'vwapLower3' : 'bbLower3'
-  const upper2Key = bandMode === 'vwap_band' ? 'vwapUpper2' : 'bbUpper2'
-  const lower2Key = bandMode === 'vwap_band' ? 'vwapLower2' : 'bbLower2'
-  const upper1Key = bandMode === 'vwap_band' ? 'vwapUpper1' : 'bbUpper1'
-  const lower1Key = bandMode === 'vwap_band' ? 'vwapLower1' : 'bbLower1'
-
   return (
     <div className="bg-[#1e2433] text-white rounded-3xl p-4 shadow-xl border border-slate-700/80 space-y-3.5">
       {/* Top Header */}
@@ -670,7 +750,7 @@ export const VwapChartCard: React.FC = () => {
           <div className="flex items-center gap-1.5">
             <Activity className="w-4 h-4 text-amber-400" />
             <h2 className="text-sm sm:text-base font-extrabold text-white">
-              銘柄別 VWAP ＆ ボリンジャーバンド
+              銘柄別 VWAP±2σ ＆ ボリンジャーチャート
             </h2>
           </div>
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700">
@@ -679,30 +759,41 @@ export const VwapChartCard: React.FC = () => {
           </span>
         </div>
 
-        {/* 1m / 5m + Manual Refresh */}
+        {/* 15m / 5m / 1m + Manual Refresh */}
         <div className="flex items-center gap-1.5">
           <div className="bg-[#0f172a] p-0.5 rounded-lg border border-slate-700 flex text-[11px] font-bold">
             <button
               type="button"
-              onClick={() => setIntervalType('1m')}
-              className={`px-2.5 py-1 rounded-md transition ${
-                interval === '1m'
+              onClick={() => setIntervalType('15m')}
+              className={`px-2 py-1 rounded-md transition ${
+                interval === '15m'
                   ? 'bg-blue-600 text-white'
                   : 'text-slate-400 hover:text-white'
               }`}
             >
-              1分足
+              15分足
             </button>
             <button
               type="button"
               onClick={() => setIntervalType('5m')}
-              className={`px-2.5 py-1 rounded-md transition ${
+              className={`px-2 py-1 rounded-md transition ${
                 interval === '5m'
                   ? 'bg-blue-600 text-white'
                   : 'text-slate-400 hover:text-white'
               }`}
             >
               5分足
+            </button>
+            <button
+              type="button"
+              onClick={() => setIntervalType('1m')}
+              className={`px-2 py-1 rounded-md transition ${
+                interval === '1m'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              1分足
             </button>
           </div>
 
@@ -764,69 +855,7 @@ export const VwapChartCard: React.FC = () => {
         </form>
       </div>
 
-      {/* Bollinger Band Mode Selector Bar */}
-      <div className="bg-[#0f172a] rounded-2xl p-2.5 border border-slate-700/90 flex items-center justify-between flex-wrap gap-2">
-        <div className="flex items-center gap-1.5">
-          <Layers className="w-3.5 h-3.5 text-purple-400 shrink-0" />
-          <span className="text-xs font-extrabold text-slate-200">
-            ボリンジャーバンド表示：
-          </span>
-        </div>
-
-        <div className="flex items-center gap-1.5 flex-wrap">
-          <div className="bg-slate-900 p-0.5 rounded-xl border border-slate-700 flex text-[11px] font-extrabold">
-            <button
-              type="button"
-              onClick={() => setBandMode('bollinger')}
-              className={`px-2.5 py-1 rounded-lg transition ${
-                bandMode === 'bollinger'
-                  ? 'bg-purple-600 text-white shadow-xs'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              BB(20) ±1σ/±2σ
-            </button>
-            <button
-              type="button"
-              onClick={() => setBandMode('vwap_band')}
-              className={`px-2.5 py-1 rounded-lg transition ${
-                bandMode === 'vwap_band'
-                  ? 'bg-amber-500 text-slate-950 shadow-xs'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              VWAP ±1σ/±2σ
-            </button>
-            <button
-              type="button"
-              onClick={() => setBandMode('off')}
-              className={`px-2 py-1 rounded-lg transition ${
-                bandMode === 'off'
-                  ? 'bg-slate-700 text-white'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              OFF
-            </button>
-          </div>
-
-          {bandMode !== 'off' && (
-            <button
-              type="button"
-              onClick={() => setShow3Sigma(!show3Sigma)}
-              className={`px-2 py-1 rounded-xl text-[10px] font-extrabold border transition ${
-                show3Sigma
-                  ? 'bg-fuchsia-500/20 text-fuchsia-300 border-fuchsia-500/50'
-                  : 'bg-slate-900 text-slate-400 border-slate-700'
-              }`}
-            >
-              ±3σ {show3Sigma ? 'ON' : 'OFF'}
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Current Price vs VWAP & Bollinger Band Summary Banner */}
+      {/* Current Price vs VWAP & ±2σ Summary Banner */}
       <div className="grid grid-cols-3 gap-2 bg-[#0f172a] rounded-2xl p-3 border border-slate-700/90 items-center">
         <div>
           <div className="text-[11px] text-slate-400 font-bold flex items-center gap-1">
@@ -854,7 +883,7 @@ export const VwapChartCard: React.FC = () => {
         <div>
           <div className="text-[11px] text-amber-300 font-bold flex items-center gap-1">
             <span className="w-2 h-2 rounded-full bg-[#f59e0b] inline-block" />
-            現在VWAP
+            累計VWAP
           </div>
           <div className="text-xl sm:text-2xl font-extrabold text-[#f59e0b] tracking-tight mt-0.5">
             {currentVwap > 0 ? `${formatNumber(currentVwap, 1)}円` : '---'}
@@ -867,7 +896,7 @@ export const VwapChartCard: React.FC = () => {
 
         <div className="text-right">
           <div className="text-[10px] text-purple-300 font-bold">
-            {bandMode === 'vwap_band' ? 'VWAPバンド位置' : 'ボリンジャー位置'}
+            バンド位置 (σ)
           </div>
           <div className="text-sm sm:text-base font-extrabold text-white font-mono mt-0.5">
             {activeSigmaScore >= 0 ? '+' : ''}
@@ -883,25 +912,26 @@ export const VwapChartCard: React.FC = () => {
         </div>
       </div>
 
-      {/* Click-and-Drag Pannable Composed Chart: Price + VWAP + Bollinger Bands */}
-      <div className="bg-[#0f172a] rounded-2xl p-3 border border-slate-700/80 space-y-2">
-        <div className="flex items-center justify-between text-xs flex-wrap gap-2">
+      {/* Main + Volume 2-Tier Synchronized Chart (Exact same visual structure as VWAP±2σ チャート学習!) */}
+      <div className="bg-[#0f172a] rounded-2xl p-3 border border-slate-700/90 space-y-2.5">
+        {/* Chart Top Controls: Title + Zoom + Bollinger Toggle + ±1σ Toggle */}
+        <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-bold text-slate-200">
-              {selectedCode} {selectedName}（09:00〜15:30）
+            <span className="text-xs font-extrabold text-amber-300">
+              {selectedCode} {selectedName}（日中VWAP ±2σ ＆ ボリンジャー・出来高連動）
             </span>
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-sky-500/15 text-sky-300 border border-sky-500/30">
               <MoveHorizontal className="w-3 h-3" />
-              クリック＆ドラッグで左右移動
+              ドラッグで左右スクロール可
             </span>
           </div>
 
-          <div className="flex items-center gap-2">
-            {/* Zoom Controls */}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {/* Zoom buttons */}
             <div className="inline-flex items-center bg-slate-900 rounded-lg p-0.5 border border-slate-700 text-[10px] font-bold">
               <button
                 type="button"
-                onClick={() => handleChangeZoom(zoom - 0.4)}
+                onClick={() => handleChangeZoom(zoom - 0.3)}
                 className="p-1 text-slate-300 hover:text-white active:scale-95"
                 title="縮小"
               >
@@ -919,43 +949,67 @@ export const VwapChartCard: React.FC = () => {
                     : 'text-slate-400 hover:text-white'
                 }`}
               >
-                全体(9:00-15:30)
+                全体
               </button>
               <button
                 type="button"
-                onClick={() => handleChangeZoom(1.8)}
+                onClick={() => handleChangeZoom(1.6)}
                 className={`px-1.5 py-0.5 rounded ${
-                  Math.abs(zoom - 1.8) < 0.2
+                  Math.abs(zoom - 1.6) < 0.15
                     ? 'bg-blue-600 text-white'
                     : 'text-slate-400 hover:text-white'
                 }`}
               >
-                1.8x拡大
+                1.6x
               </button>
               <button
                 type="button"
-                onClick={() => handleChangeZoom(3.0)}
+                onClick={() => handleChangeZoom(2.4)}
                 className={`px-1.5 py-0.5 rounded ${
-                  zoom >= 2.6
+                  zoom >= 2.2
                     ? 'bg-blue-600 text-white'
                     : 'text-slate-400 hover:text-white'
                 }`}
               >
-                3.0x拡大
+                2.4x
               </button>
               <button
                 type="button"
-                onClick={() => handleChangeZoom(zoom + 0.4)}
+                onClick={() => handleChangeZoom(zoom + 0.3)}
                 className="p-1 text-slate-300 hover:text-white active:scale-95"
                 title="拡大"
               >
                 <ZoomIn className="w-3.5 h-3.5" />
               </button>
             </div>
+
+            <button
+              type="button"
+              onClick={() => setShowBollingerOverlay(!showBollingerOverlay)}
+              className={`px-2 py-1 rounded-lg text-[10px] font-extrabold border transition ${
+                showBollingerOverlay
+                  ? 'bg-purple-600/30 text-purple-200 border-purple-400/60'
+                  : 'bg-slate-900 text-slate-500 border-slate-800'
+              }`}
+            >
+              ボリンジャー(BB) {showBollingerOverlay ? 'ON' : 'OFF'}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShow1Sigma(!show1Sigma)}
+              className={`px-2 py-1 rounded-lg text-[10px] font-bold border transition ${
+                show1Sigma
+                  ? 'bg-slate-800 text-slate-200 border-slate-600'
+                  : 'bg-slate-900 text-slate-500 border-slate-800'
+              }`}
+            >
+              ±1σ {show1Sigma ? 'ON' : 'OFF'}
+            </button>
           </div>
         </div>
 
-        {/* Legend */}
+        {/* Legend (Matches VwapBandSimulator!) */}
         <div className="flex items-center flex-wrap gap-x-3 gap-y-1 text-[11px] font-bold">
           <span className="flex items-center gap-1 text-[#38bdf8]">
             <span className="w-3 h-0.5 bg-[#38bdf8] inline-block" />
@@ -963,49 +1017,40 @@ export const VwapChartCard: React.FC = () => {
           </span>
           <span className="flex items-center gap-1 text-[#f59e0b]">
             <span className="w-3.5 h-1 bg-[#f59e0b] inline-block rounded-full" />
-            VWAP
+            VWAP (機関基準)
           </span>
-          {bandMode === 'bollinger' && (
-            <span className="flex items-center gap-1 text-purple-400">
-              <span className="w-3 h-0.5 bg-purple-400 inline-block" />
-              SMA(20)
+          <span className="flex items-center gap-1 text-rose-400">
+            <span className="w-3 h-0.5 border-b-2 border-dashed border-rose-400 inline-block" />
+            VWAP+2σ
+          </span>
+          <span className="flex items-center gap-1 text-emerald-400">
+            <span className="w-3 h-0.5 border-b-2 border-dashed border-emerald-400 inline-block" />
+            VWAP-2σ
+          </span>
+          {showBollingerOverlay && (
+            <span className="flex items-center gap-1 text-purple-300">
+              <span className="w-3 h-1.5 bg-purple-500/40 border border-purple-400 inline-block rounded-xs" />
+              ボリンジャーバンド(SMA±2σ)
             </span>
-          )}
-          {bandMode !== 'off' && (
-            <>
-              <span className="flex items-center gap-1 text-rose-400">
-                <span className="w-3 h-0.5 border-b-2 border-dashed border-rose-400 inline-block" />
-                +2σ
-              </span>
-              <span className="flex items-center gap-1 text-slate-400">
-                <span className="w-2.5 h-0.5 border-b border-dashed border-slate-400 inline-block" />
-                ±1σ
-              </span>
-              <span className="flex items-center gap-1 text-emerald-400">
-                <span className="w-3 h-0.5 border-b-2 border-dashed border-emerald-400 inline-block" />
-                -2σ
-              </span>
-              {show3Sigma && (
-                <span className="flex items-center gap-1 text-fuchsia-400">
-                  <span className="w-2.5 h-0.5 border-b border-dotted border-fuchsia-400 inline-block" />
-                  ±3σ
-                </span>
-              )}
-            </>
           )}
         </div>
 
-        {/* Interactive Click-and-Drag Chart Box */}
+        {/* Interactive Click-and-Drag Chart Box (Pinned Y-Axis + Upper Main Chart + Lower Volume BarChart) */}
         <div className="relative rounded-xl border border-slate-800 bg-[#0b1120] overflow-hidden">
           <div className="flex">
-            {/* Pinned Left Y-Axis Column */}
-            <div className="w-12 shrink-0 border-r border-slate-800/90 bg-[#0f172a]/95 z-10 select-none">
-              <div className="h-64 pt-[8px] pb-[22px] px-1.5 flex flex-col justify-between items-end text-[10px] font-mono text-slate-400">
+            {/* Pinned Left Y-Axis Column (Price + Volume) */}
+            <div className="w-12 shrink-0 border-r border-slate-800/90 bg-[#0f172a]/95 z-10 select-none flex flex-col">
+              <div className="h-[268px] pt-[28px] pb-[22px] px-1.5 flex flex-col justify-between items-end text-[10px] font-mono text-slate-400">
                 {yTicks.map((t) => (
                   <span key={t} className="leading-none">
                     {t}
                   </span>
                 ))}
+              </div>
+              <div className="h-24 border-t border-slate-800/80 pt-1.5 pb-4 px-1.5 flex flex-col justify-between items-end text-[9px] font-mono text-slate-500">
+                <span>{maxVolume.toLocaleString()}</span>
+                <span>出来高</span>
+                <span>0</span>
               </div>
             </div>
 
@@ -1026,262 +1071,350 @@ export const VwapChartCard: React.FC = () => {
                   width: `${canvasWidth}px`,
                   transform: `translate3d(${panX}px, 0, 0)`,
                 }}
-                className="h-64 will-change-transform"
+                className="will-change-transform"
               >
-                <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart
-                    data={chartData}
-                    margin={{ top: 8, right: 20, left: 10, bottom: 0 }}
-                  >
-                    <CartesianGrid
-                      strokeDasharray="3 3"
-                      stroke="#1e293b"
-                      vertical={false}
-                    />
-                    <XAxis
-                      dataKey="time"
-                      height={22}
-                      tick={{ fontSize: 10, fill: '#94a3b8' }}
-                      axisLine={false}
-                      tickLine={false}
-                      minTickGap={22}
-                    />
-                    <YAxis domain={yDomain} ticks={yTicks} hide />
-                    <Tooltip
-                      content={({ active, payload }) => {
-                        if (
-                          isDragging ||
-                          !active ||
-                          !payload ||
-                          !payload.length
-                        ) {
-                          return null
-                        }
-                        const pt = payload[0].payload as VwapDataPoint
-                        const diff = pt.price - pt.vwap
-                        const diffPct = pt.vwap > 0 ? (diff / pt.vwap) * 100 : 0
-                        const u2 =
-                          bandMode === 'vwap_band' ? pt.vwapUpper2 : pt.bbUpper2
-                        const u1 =
-                          bandMode === 'vwap_band' ? pt.vwapUpper1 : pt.bbUpper1
-                        const l1 =
-                          bandMode === 'vwap_band' ? pt.vwapLower1 : pt.bbLower1
-                        const l2 =
-                          bandMode === 'vwap_band' ? pt.vwapLower2 : pt.bbLower2
-                        return (
-                          <div className="bg-slate-900/95 border border-slate-600 rounded-xl p-2.5 text-xs shadow-xl space-y-1 min-w-[195px]">
-                            <div className="font-bold text-slate-300 border-b border-slate-700 pb-1">
-                              ⏰ {pt.time} 時点
-                            </div>
-                            <div className="flex items-center justify-between gap-4">
-                              <span className="text-[#38bdf8] font-bold">
-                                株価：
-                              </span>
-                              <span className="font-extrabold text-white font-mono">
-                                {pt.price.toLocaleString()} 円
-                              </span>
-                            </div>
-                            <div className="flex items-center justify-between gap-4">
-                              <span className="text-[#f59e0b] font-bold">
-                                VWAP：
-                              </span>
-                              <span className="font-extrabold text-[#f59e0b] font-mono">
-                                {pt.vwap.toLocaleString()} 円
-                              </span>
-                            </div>
-                            <div className="flex items-center justify-between gap-4">
-                              <span className="text-slate-400">VWAP乖離：</span>
-                              <span
-                                className={`font-bold font-mono ${
-                                  diff >= 0
-                                    ? 'text-emerald-400'
-                                    : 'text-rose-400'
-                                }`}
-                              >
-                                {diff >= 0 ? '+' : ''}
-                                {diff.toFixed(1)}円 ({diffPct >= 0 ? '+' : ''}
-                                {diffPct.toFixed(2)}%)
-                              </span>
-                            </div>
-                            {bandMode !== 'off' && (
-                              <div className="border-t border-slate-800 pt-1 mt-1 space-y-0.5 text-[11px]">
-                                {bandMode === 'bollinger' && (
-                                  <div className="flex justify-between text-purple-300">
-                                    <span>SMA(20) 中央線：</span>
-                                    <span className="font-mono font-bold">
-                                      {pt.bbMiddle.toLocaleString()} 円
-                                    </span>
-                                  </div>
-                                )}
-                                <div className="flex justify-between text-rose-300">
-                                  <span>+2σ バンド：</span>
-                                  <span className="font-mono font-bold">
-                                    {u2.toLocaleString()} 円
+                {/* Upper Main Chart: Price + VWAP + ±1σ / ±2σ Bands + Bollinger Ribbon */}
+                <div className="h-[268px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart
+                      data={chartData}
+                      margin={{ top: 28, right: 32, left: 16, bottom: 0 }}
+                    >
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="#1e293b"
+                        vertical={false}
+                      />
+                      <XAxis
+                        dataKey="time"
+                        height={22}
+                        tick={{ fontSize: 10, fill: '#94a3b8' }}
+                        axisLine={false}
+                        tickLine={false}
+                        minTickGap={16}
+                      />
+                      <YAxis domain={yDomain} ticks={yTicks} hide />
+                      <Tooltip
+                        content={({ active, payload }) => {
+                          if (
+                            isDragging ||
+                            !active ||
+                            !payload ||
+                            !payload.length
+                          ) {
+                            return null
+                          }
+                          const pt = payload[0].payload as VwapDataPoint
+                          return (
+                            <div className="bg-slate-900/95 border border-slate-600 rounded-xl p-2.5 text-xs shadow-xl space-y-1 min-w-[215px]">
+                              <div className="flex items-center justify-between border-b border-slate-700 pb-1">
+                                <span className="font-extrabold text-white">
+                                  ⏰ {pt.time}
+                                </span>
+                                {pt.signalLabel && (
+                                  <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-extrabold text-[10px]">
+                                    {pt.signalLabel}
                                   </span>
-                                </div>
-                                <div className="flex justify-between text-slate-400">
-                                  <span>±1σ レンジ：</span>
-                                  <span className="font-mono">
-                                    {l1.toLocaleString()} 〜{' '}
-                                    {u1.toLocaleString()} 円
+                                )}
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-[#38bdf8] font-bold">
+                                  現在値 (Price)：
+                                </span>
+                                <span className="font-mono font-extrabold text-white">
+                                  {pt.price.toLocaleString()}円
+                                </span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-[#f59e0b] font-bold">
+                                  累計VWAP：
+                                </span>
+                                <span className="font-mono font-extrabold text-[#f59e0b]">
+                                  {pt.vwap.toLocaleString()}円
+                                </span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-slate-400">
+                                  VWAP乖離率：
+                                </span>
+                                <span
+                                  className={`font-mono font-bold ${
+                                    pt.vwapDeviationRate >= 0
+                                      ? 'text-emerald-400'
+                                      : 'text-rose-400'
+                                  }`}
+                                >
+                                  {pt.vwapDeviationRate >= 0 ? '+' : ''}
+                                  {pt.vwapDeviationRate.toFixed(2)}%
+                                </span>
+                              </div>
+                              <div className="border-t border-slate-800 pt-1 mt-1 space-y-0.5 text-[11px]">
+                                <div className="flex justify-between text-rose-300">
+                                  <span>VWAP +2σ：</span>
+                                  <span className="font-mono font-bold">
+                                    {pt.upperBand2Sigma.toLocaleString()}円
                                   </span>
                                 </div>
                                 <div className="flex justify-between text-emerald-300">
-                                  <span>-2σ バンド：</span>
+                                  <span>VWAP -2σ：</span>
                                   <span className="font-mono font-bold">
-                                    {l2.toLocaleString()} 円
+                                    {pt.lowerBand2Sigma.toLocaleString()}円
+                                  </span>
+                                </div>
+                                {showBollingerOverlay && (
+                                  <div className="flex justify-between text-purple-300">
+                                    <span>ボリンジャー±2σ：</span>
+                                    <span className="font-mono font-bold">
+                                      {pt.bbLower2.toLocaleString()} 〜{' '}
+                                      {pt.bbUpper2.toLocaleString()}円
+                                    </span>
+                                  </div>
+                                )}
+                                <div className="flex justify-between text-amber-200/90 pt-0.5">
+                                  <span>出来高：</span>
+                                  <span className="font-mono font-bold">
+                                    {pt.volume.toLocaleString()} 株
                                   </span>
                                 </div>
                               </div>
-                            )}
-                          </div>
-                        )
-                      }}
-                    />
-
-                    {prevClose && (
-                      <ReferenceLine
-                        y={prevClose}
-                        stroke="#64748b"
-                        strokeDasharray="4 4"
-                        strokeWidth={1}
+                            </div>
+                          )
+                        }}
                       />
-                    )}
 
-                    {/* Bollinger Band Shaded Ribbon Area (±2σ and ±1σ) */}
-                    {bandMode !== 'off' && (
-                      <>
+                      {/* Shaded Ribbon Fill for VWAP ±2σ and ±1σ */}
+                      <Area
+                        type="monotone"
+                        dataKey="bandRange2Sigma"
+                        stroke="none"
+                        fill="#38bdf8"
+                        fillOpacity={0.06}
+                        isAnimationActive={false}
+                      />
+                      {show1Sigma && (
                         <Area
                           type="monotone"
-                          dataKey={range2Key}
+                          dataKey="bandRange1Sigma"
                           stroke="none"
-                          fill={
-                            bandMode === 'bollinger' ? '#a855f7' : '#38bdf8'
+                          fill="#38bdf8"
+                          fillOpacity={0.09}
+                          isAnimationActive={false}
+                        />
+                      )}
+
+                      {/* Standard Bollinger Band Ribbon (SMA ± 2σ) */}
+                      {showBollingerOverlay && (
+                        <>
+                          <Area
+                            type="monotone"
+                            dataKey="bbRange2"
+                            stroke="none"
+                            fill="#a855f7"
+                            fillOpacity={0.12}
+                            isAnimationActive={false}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="bbUpper2"
+                            stroke="#c084fc"
+                            strokeWidth={1.3}
+                            strokeDasharray="2 2"
+                            dot={false}
+                            isAnimationActive={false}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="bbMiddle"
+                            stroke="#a855f7"
+                            strokeWidth={1.2}
+                            dot={false}
+                            isAnimationActive={false}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="bbLower2"
+                            stroke="#c084fc"
+                            strokeWidth={1.3}
+                            strokeDasharray="2 2"
+                            dot={false}
+                            isAnimationActive={false}
+                          />
+                        </>
+                      )}
+
+                      {/* Vertical reference lines on key signal points */}
+                      {signalPoints.map((sp) => (
+                        <ReferenceLine
+                          key={sp.time}
+                          x={sp.time}
+                          stroke={
+                            sp.signalType === 'entry_buy'
+                              ? '#10b981'
+                              : sp.signalType === 'entry_sell'
+                              ? '#f43f5e'
+                              : '#f59e0b'
                           }
-                          fillOpacity={0.08}
-                          isAnimationActive={false}
-                        />
-                        <Area
-                          type="monotone"
-                          dataKey={range1Key}
-                          stroke="none"
-                          fill={
-                            bandMode === 'bollinger' ? '#a855f7' : '#38bdf8'
-                          }
-                          fillOpacity={0.12}
-                          isAnimationActive={false}
-                        />
-                      </>
-                    )}
-
-                    {/* ±3σ Lines (Optional) */}
-                    {bandMode !== 'off' && show3Sigma && (
-                      <>
-                        <Line
-                          type="monotone"
-                          dataKey={upper3Key}
-                          stroke="#e879f9"
-                          strokeWidth={1.2}
-                          strokeDasharray="2 3"
-                          dot={false}
-                          isAnimationActive={false}
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey={lower3Key}
-                          stroke="#e879f9"
-                          strokeWidth={1.2}
-                          strokeDasharray="2 3"
-                          dot={false}
-                          isAnimationActive={false}
-                        />
-                      </>
-                    )}
-
-                    {/* ±2σ Lines */}
-                    {bandMode !== 'off' && (
-                      <>
-                        <Line
-                          type="monotone"
-                          dataKey={upper2Key}
-                          stroke="#fb7185"
-                          strokeWidth={1.6}
-                          strokeDasharray="5 3"
-                          dot={false}
-                          isAnimationActive={false}
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey={lower2Key}
-                          stroke="#34d399"
-                          strokeWidth={1.6}
-                          strokeDasharray="5 3"
-                          dot={false}
-                          isAnimationActive={false}
-                        />
-                      </>
-                    )}
-
-                    {/* ±1σ Lines */}
-                    {bandMode !== 'off' && (
-                      <>
-                        <Line
-                          type="monotone"
-                          dataKey={upper1Key}
-                          stroke="#94a3b8"
-                          strokeWidth={1.1}
                           strokeDasharray="3 3"
-                          dot={false}
-                          isAnimationActive={false}
+                          label={{
+                            value: sp.signalLabel,
+                            position: 'top',
+                            dy: -4,
+                            fill: '#fbbf24',
+                            fontSize: 10,
+                            fontWeight: 800,
+                          }}
                         />
-                        <Line
-                          type="monotone"
-                          dataKey={lower1Key}
-                          stroke="#94a3b8"
-                          strokeWidth={1.1}
-                          strokeDasharray="3 3"
-                          dot={false}
-                          isAnimationActive={false}
-                        />
-                      </>
-                    )}
+                      ))}
 
-                    {/* SMA(20) Middle Line when in standard Bollinger Band mode */}
-                    {bandMode === 'bollinger' && (
+                      {/* VWAP +2σ Band */}
                       <Line
                         type="monotone"
-                        dataKey="bbMiddle"
-                        stroke="#a78bfa"
-                        strokeWidth={1.6}
+                        dataKey="upperBand2Sigma"
+                        stroke="#fb7185"
+                        strokeWidth={1.5}
+                        strokeDasharray="5 4"
                         dot={false}
                         isAnimationActive={false}
                       />
-                    )}
 
-                    {/* VWAP Line (Gold/Amber) */}
-                    <Line
-                      type="monotone"
-                      dataKey="vwap"
-                      name="VWAP"
-                      stroke="#f59e0b"
-                      strokeWidth={2.6}
-                      dot={false}
-                      isAnimationActive={false}
-                    />
+                      {/* VWAP +1σ / -1σ Bands */}
+                      {show1Sigma && (
+                        <>
+                          <Line
+                            type="monotone"
+                            dataKey="upperBand1Sigma"
+                            stroke="#64748b"
+                            strokeWidth={1}
+                            strokeDasharray="3 3"
+                            dot={false}
+                            isAnimationActive={false}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="lowerBand1Sigma"
+                            stroke="#64748b"
+                            strokeWidth={1}
+                            strokeDasharray="3 3"
+                            dot={false}
+                            isAnimationActive={false}
+                          />
+                        </>
+                      )}
 
-                    {/* Intraday Price Line (Sky Blue) */}
-                    <Line
-                      type="monotone"
-                      dataKey="price"
-                      name="株価"
-                      stroke="#38bdf8"
-                      strokeWidth={2.3}
-                      dot={{ r: 2, fill: '#38bdf8', strokeWidth: 0 }}
-                      activeDot={{ r: 5, fill: '#38bdf8', stroke: '#fff' }}
-                      isAnimationActive={false}
-                    />
-                  </ComposedChart>
-                </ResponsiveContainer>
+                      {/* VWAP -2σ Band */}
+                      <Line
+                        type="monotone"
+                        dataKey="lowerBand2Sigma"
+                        stroke="#34d399"
+                        strokeWidth={1.5}
+                        strokeDasharray="5 4"
+                        dot={false}
+                        isAnimationActive={false}
+                      />
+
+                      {/* Cumulative VWAP Line (Gold/Amber) */}
+                      <Line
+                        type="monotone"
+                        dataKey="vwap"
+                        name="VWAP"
+                        stroke="#f59e0b"
+                        strokeWidth={3}
+                        dot={false}
+                        isAnimationActive={false}
+                      />
+
+                      {/* Intraday Price Line (Sky Blue with Signal Dots) */}
+                      <Line
+                        type="monotone"
+                        dataKey="price"
+                        name="株価"
+                        stroke="#38bdf8"
+                        strokeWidth={2.5}
+                        dot={(props) => {
+                          const { cx, cy, payload } = props as {
+                            cx?: number
+                            cy?: number
+                            payload?: VwapDataPoint
+                          }
+                          if (
+                            cx === undefined ||
+                            cy === undefined ||
+                            !payload
+                          ) {
+                            return <g key="empty" />
+                          }
+                          if (!payload.signalLabel) {
+                            return (
+                              <circle
+                                key={payload.time}
+                                cx={cx}
+                                cy={cy}
+                                r={interval === '15m' ? 3 : 2}
+                                fill="#38bdf8"
+                              />
+                            )
+                          }
+                          const fill =
+                            payload.signalType === 'entry_buy'
+                              ? '#10b981'
+                              : payload.signalType === 'entry_sell'
+                              ? '#f43f5e'
+                              : '#f59e0b'
+                          return (
+                            <circle
+                              key={payload.time}
+                              cx={cx}
+                              cy={cy}
+                              r={6}
+                              fill={fill}
+                              stroke="#ffffff"
+                              strokeWidth={2}
+                            />
+                          )
+                        }}
+                        activeDot={{ r: 6, fill: '#38bdf8', stroke: '#fff' }}
+                        isAnimationActive={false}
+                      />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+
+                {/* Lower Synchronized Volume Bar Chart */}
+                <div className="h-24 w-full border-t border-slate-800/80 pt-1">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={chartData}
+                      margin={{ top: 4, right: 32, left: 16, bottom: 0 }}
+                    >
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="#1e293b"
+                        vertical={false}
+                      />
+                      <XAxis
+                        dataKey="time"
+                        height={18}
+                        tick={{ fontSize: 9, fill: '#64748b' }}
+                        axisLine={false}
+                        tickLine={false}
+                        minTickGap={16}
+                      />
+                      <YAxis domain={[0, maxVolume]} hide />
+                      <Bar
+                        dataKey="volume"
+                        radius={[3, 3, 0, 0]}
+                        isAnimationActive={false}
+                      >
+                        {chartData.map((entry) => (
+                          <Cell
+                            key={entry.time}
+                            fill={entry.isInflection ? '#f59e0b' : '#475569'}
+                          />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
               </div>
             </div>
           </div>

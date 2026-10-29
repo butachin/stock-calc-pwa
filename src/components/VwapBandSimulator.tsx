@@ -57,7 +57,7 @@ export interface CalculatedIntradayPoint extends IntradayBasePoint {
   lowerBand3Sigma: number
   bandRange2Sigma: [number, number]
   bandRange1Sigma: [number, number]
-  // Standard SMA Bollinger Bands (10-bar window for 15m bars)
+  // Standard SMA Bollinger Bands
   bbMiddle: number
   bbUpper2: number
   bbLower2: number
@@ -240,8 +240,6 @@ export const VwapBandSimulator: React.FC = () => {
     useState<boolean>(true)
 
   // Horizontal Click-and-Drag Pan & Zoom state
-  // Default zoom = 1.0 so the entire 09:00〜15:30 day is visible immediately without cutting off at 13:15/13:25,
-  // while still allowing free horizontal click-and-drag panning!
   const [zoom, setZoom] = useState<number>(1.0)
   const [panX, setPanX] = useState<number>(0)
   const [isDragging, setIsDragging] = useState<boolean>(false)
@@ -417,7 +415,7 @@ export const VwapBandSimulator: React.FC = () => {
     return result
   }, [activePattern, volumeMultiplier, volatilityMultiplier])
 
-  // Compute 5 evenly spaced Y-axis ticks so the pinned left Y-axis and horizontal grid lines match 100%
+  // Compute 5 evenly spaced Y-axis ticks with generous top/bottom padding so nothing is clipped at the top
   const { yDomain, yTicks } = useMemo(() => {
     if (calculatedData.length === 0) {
       return {
@@ -435,9 +433,11 @@ export const VwapBandSimulator: React.FC = () => {
         maxVal = Math.max(maxVal, d.bbUpper2)
       }
     }
-    const pad = Math.max(20, Math.round((maxVal - minVal) * 0.08))
-    const rawMin = Math.floor((minVal - pad) / 10) * 10
-    const rawMax = Math.ceil((maxVal + pad) / 10) * 10
+    const range = Math.max(60, maxVal - minVal)
+    const bottomPad = Math.max(25, Math.round(range * 0.12))
+    const topPad = Math.max(45, Math.round(range * 0.2))
+    const rawMin = Math.floor((minVal - bottomPad) / 10) * 10
+    const rawMax = Math.ceil((maxVal + topPad) / 10) * 10
     const step = Math.max(10, Math.ceil((rawMax - rawMin) / 4 / 10) * 10)
     const finalMax = rawMin + step * 4
     return {
@@ -754,7 +754,8 @@ export const VwapBandSimulator: React.FC = () => {
               <div className="flex">
                 {/* Pinned Left Y-Axis Column (Price + Volume) */}
                 <div className="w-12 shrink-0 border-r border-slate-800/90 bg-[#0f172a]/95 z-10 select-none flex flex-col">
-                  <div className="h-60 pt-[10px] pb-[22px] px-1.5 flex flex-col justify-between items-end text-[10px] font-mono text-slate-400">
+                  {/* Top Chart Y-Axis Ticks (matches h-68 = 272px, top:28, bottom:22) */}
+                  <div className="h-[268px] pt-[28px] pb-[22px] px-1.5 flex flex-col justify-between items-end text-[10px] font-mono text-slate-400">
                     {yTicks.map((t) => (
                       <span key={t} className="leading-none">
                         {t}
@@ -788,11 +789,11 @@ export const VwapBandSimulator: React.FC = () => {
                     className="will-change-transform"
                   >
                     {/* Upper Main Chart: Price + VWAP + ±1σ / ±2σ Bands + Bollinger Ribbon */}
-                    <div className="h-60 w-full">
+                    <div className="h-[268px] w-full">
                       <ResponsiveContainer width="100%" height="100%">
                         <ComposedChart
                           data={calculatedData}
-                          margin={{ top: 10, right: 24, left: 12, bottom: 0 }}
+                          margin={{ top: 28, right: 32, left: 16, bottom: 0 }}
                         >
                           <CartesianGrid
                             strokeDasharray="3 3"
@@ -972,6 +973,7 @@ export const VwapBandSimulator: React.FC = () => {
                               label={{
                                 value: sp.signalLabel,
                                 position: 'top',
+                                dy: -4,
                                 fill: '#fbbf24',
                                 fontSize: 10,
                                 fontWeight: 800,
@@ -1099,7 +1101,7 @@ export const VwapBandSimulator: React.FC = () => {
                       <ResponsiveContainer width="100%" height="100%">
                         <BarChart
                           data={calculatedData}
-                          margin={{ top: 4, right: 24, left: 12, bottom: 0 }}
+                          margin={{ top: 4, right: 32, left: 16, bottom: 0 }}
                         >
                           <CartesianGrid
                             strokeDasharray="3 3"
@@ -1187,7 +1189,7 @@ export const VwapBandSimulator: React.FC = () => {
               <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
               なぜVWAPとボリンジャーバンド（±2σ）を重ねて見るのか？
             </div>
-            <ul className="text-[11px] text-slate-300 space-y-1.5 leading-relaxed list-disc pl-4">
+            <ul className="text-[11px] text-slate-300 space-y-1.5 leading-relaxed list-disc list-inside">
               <li>
                 <strong className="text-white">
                   機関投資家のVWAPギャランティ取引：
@@ -1196,9 +1198,9 @@ export const VwapBandSimulator: React.FC = () => {
               </li>
               <li>
                 <strong className="text-white">
-                  ボリンジャーバンド（±1σ / ±2σ / ±3σ）のスクイーズ＆エクスパンション：
+                  ボリンジャーバンド（±1σ / ±2σ）のスクイーズ＆エクスパンション：
                 </strong>
-                バンド幅が狭まった状態（スクイーズ）から出来高を伴ってVWAPや+2σを上抜けると強いトレンド（バンドウォーク）が発生しやすく、逆に急騰後に+2σ〜+3σへ到達して失速した箇所は格好の利確目安になります。
+                バンド幅が狭まった状態（スクイーズ）から出来高を伴ってVWAPや+2σを上抜けると強いトレンド（バンドウォーク）が発生しやすく、逆に急騰後に+2σへ到達して失速した箇所は格好の利確目安になります。
               </li>
             </ul>
           </div>
