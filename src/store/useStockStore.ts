@@ -1,7 +1,14 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
-export type TabType = 'oco' | 'nanpin' | 'dividend' | 'compound' | 'notebook'
+export type TabType =
+  | 'oco'
+  | 'vwap_board'
+  | 'vwap_band'
+  | 'nanpin'
+  | 'dividend'
+  | 'compound'
+  | 'notebook'
 
 export type StockTag = '保有中' | '気になる' | 'NISA候補'
 export type OcoSide = 'long' | 'short'

@@ -1,19 +1,21 @@
 import { useState } from 'react'
 import {
+  Activity,
   BookMarked,
   Calculator,
   CheckCircle2,
-  Coins,
   FileSpreadsheet,
+  Layers,
   Loader2,
   Smartphone,
   Sparkles,
-  TrendingUp,
   X,
   Zap,
 } from 'lucide-react'
 import { useStockStore, type TabType } from './store/useStockStore'
 import { OcoCalculator } from './components/OcoCalculator'
+import { VwapOrderBookSimulator } from './components/VwapOrderBookSimulator'
+import { VwapBandSimulator } from './components/VwapBandSimulator'
 import { NanpinCalculator } from './components/NanpinCalculator'
 import { DividendCalculator } from './components/DividendCalculator'
 import { CompoundSimulator } from './components/CompoundSimulator'
@@ -33,27 +35,27 @@ const NAV_ITEMS: {
     icon: Zap,
   },
   {
+    id: 'vwap_board',
+    label: '板・歩み値',
+    sub: 'VWAP攻防',
+    icon: Layers,
+  },
+  {
+    id: 'vwap_band',
+    label: 'VWAP±2σ',
+    sub: '日中バンド',
+    icon: Activity,
+  },
+  {
     id: 'nanpin',
     label: 'ナンピン',
     sub: '平均単価',
     icon: Calculator,
   },
   {
-    id: 'dividend',
-    label: '配当NISA',
-    sub: '利回り・優待',
-    icon: Coins,
-  },
-  {
-    id: 'compound',
-    label: '積立複利',
-    sub: '将来グラフ',
-    icon: TrendingUp,
-  },
-  {
     id: 'notebook',
     label: '株ノート',
-    sub: '銘柄・用語',
+    sub: '銘柄・NISA',
     icon: BookMarked,
   },
 ]
@@ -82,11 +84,11 @@ export function App() {
                   かぶポケ
                 </h1>
                 <span className="px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-extrabold shrink-0">
-                  OCO＆株計算
+                  OCO＆VWAP
                 </span>
               </div>
               <p className="text-[10px] text-slate-400 font-medium truncate">
-                デイトレOCO・ナンピン・NISAシミュレーター
+                OCO即算・VWAP板読み・±2σシミュレーター
               </p>
             </div>
           </div>
@@ -137,6 +139,8 @@ export function App() {
         {/* Main Scrollable Content Area */}
         <main className="flex-1 px-3.5 pt-3.5 pb-24 overflow-x-hidden">
           {activeTab === 'oco' && <OcoCalculator />}
+          {activeTab === 'vwap_board' && <VwapOrderBookSimulator />}
+          {activeTab === 'vwap_band' && <VwapBandSimulator />}
           {activeTab === 'nanpin' && <NanpinCalculator />}
           {activeTab === 'dividend' && <DividendCalculator />}
           {activeTab === 'compound' && <CompoundSimulator />}
