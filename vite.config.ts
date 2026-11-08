@@ -2,19 +2,12 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
+import { localChartApiPlugin } from './dev/localChartApi.js'
 
 // https://vite.dev/config/
 export default defineConfig({
-  server: {
-    proxy: {
-      '/yahoo-api': {
-        target: 'https://query1.finance.yahoo.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/yahoo-api/, ''),
-      },
-    },
-  },
   plugins: [
+    localChartApiPlugin(),
     react(),
     tailwindcss(),
     VitePWA({
@@ -22,6 +15,12 @@ export default defineConfig({
       includeAssets: ['icon.svg'],
       workbox: {
         navigateFallbackDenylist: [/^\/api\//, /^\/yahoo-api\//],
+        runtimeCaching: [
+          {
+            urlPattern: /\/api\/chart/,
+            handler: 'NetworkOnly',
+          },
+        ],
       },
       manifest: {
         name: 'かぶポケ - 株の計算＆NISAシミュレーター',

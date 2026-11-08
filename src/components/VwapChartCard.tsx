@@ -15,9 +15,11 @@ import {
 } from 'recharts'
 import {
   Activity,
+  AlertCircle,
   ArrowDownRight,
   ArrowUpRight,
   MoveHorizontal,
+  Radio,
   RefreshCw,
   Search,
   Zap,
@@ -36,6 +38,7 @@ export interface VwapDataPoint {
   volume: number
   cumVolume: number
   isInflection?: boolean
+  isLatest?: boolean
   signalLabel?: string
   signalType?: 'entry_buy' | 'entry_sell' | 'take_profit'
   vwapDeviationRate: number
@@ -62,20 +65,46 @@ interface PresetTicker {
 }
 
 const POPULAR_DAYTRADE_TICKERS: PresetTicker[] = [
-  { code: '7011', name: '三菱重工', basePrice: 2215 },
-  { code: '6920', name: 'レーザーテック', basePrice: 15420 },
+  { code: '7011', name: '三菱重工', basePrice: 2912 },
+  { code: '6920', name: 'レーザーテック', basePrice: 32040 },
   { code: '5803', name: 'フジクラ', basePrice: 5680 },
   { code: '6146', name: 'ディスコ', basePrice: 38500 },
-  { code: '8306', name: '三菱UFJ', basePrice: 1850 },
+  { code: '8306', name: '三菱UFJ', basePrice: 3224 },
   { code: '7012', name: '川崎重工', basePrice: 6420 },
   { code: '9984', name: 'ソフトバンクG', basePrice: 9150 },
   { code: '9432', name: 'NTT', basePrice: 155 },
 ]
 
+const POLL_INTERVAL_MS = 10_000
+const JST_OFFSET_MS = 9 * 3600 * 1000
+
 const clamp = (val: number, min: number, max: number) =>
   Math.max(min, Math.min(max, val))
 
-// Deterministic pseudo-random generator seeded by stock code so the chart NEVER jumps randomly
+function getJstNowInfo() {
+  const d = new Date(Date.now() + JST_OFFSET_MS)
+  const dateStr = d.toISOString().slice(0, 10)
+  const dayOfWeek = d.getUTCDay() // 0=Sun, 6=Sat
+  const minutesOfDay = d.getUTCHours() * 60 + d.getUTCMinutes()
+  const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5
+  const isTseTradingHours =
+    isWeekday &&
+    ((minutesOfDay >= 9 * 60 && minutesOfDay <= 11 * 60 + 35) ||
+      (minutesOfDay >= 12 * 60 + 25 && minutesOfDay <= 15 * 60 + 35))
+  const nowHms = `${String(d.getUTCHours()).padStart(2, '0')}:${String(
+    d.getUTCMinutes()
+  ).padStart(2, '0')}:${String(d.getUTCSeconds()).padStart(2, '0')}`
+  return { dateStr, isWeekday, isTseTradingHours, nowHms }
+}
+
+function formatCompactVolume(vol: number): string {
+  if (vol >= 100_000_000) return `${(vol / 100_000_000).toFixed(1)}億`
+  if (vol >= 10_000) return `${Math.round(vol / 10_000)}万`
+  if (vol >= 1_000) return `${(vol / 1_000).toFixed(1)}千`
+  return `${Math.round(vol)}`
+}
+
+// Deterministic pseudo-random generator for offline fallback only
 function seededNoise(seed: number, step: number): number {
   const x = Math.sin(seed * 9301 + step * 49297 + 233280) * 10000
   return x - Math.floor(x)
@@ -89,22 +118,42 @@ interface RawPoint {
   volume: number
 }
 
+interface ObservedLiveBucket {
+  bucketTsSec: number
+  latestTsSec: number
+  time: string
+  open: number
+  high: number
+  low: number
+  close: number
+  cumVol: number
+  officialVwap: number | null
+}
+
+interface PtsQuoteInfo {
+  price: number
+  change: number | null
+  changeRate: number | null
+  updateTime: string | null
+}
+
 // Compute cumulative VWAP + VWAP ±1σ/±2σ Bands + SMA Bollinger Bands + Auto Signal Detection
 function enrichWithVwapAndBollinger(
   rawPoints: RawPoint[],
-  bbPeriod = 8
+  bbPeriod = 12
 ): VwapDataPoint[] {
   let cumPV = 0
   let cumVol = 0
+  const nonZeroVols = rawPoints.filter((p) => p.volume > 0)
   const avgVol =
-    rawPoints.reduce((acc, p) => acc + (p.volume || 1000), 0) /
-    Math.max(1, rawPoints.length)
+    nonZeroVols.reduce((acc, p) => acc + p.volume, 0) /
+    Math.max(1, nonZeroVols.length)
 
   const result: VwapDataPoint[] = []
 
   for (let i = 0; i < rawPoints.length; i++) {
     const pt = rawPoints[i]
-    const v = Math.max(100, pt.volume || 1000)
+    const v = Math.max(0, pt.volume || 0)
 
     cumPV += pt.typicalPrice * v
     cumVol += v
@@ -116,7 +165,8 @@ function enrichWithVwapAndBollinger(
     // 1. Volume-weighted standard deviation around VWAP
     let weightedSqSum = 0
     for (let j = 0; j <= i; j++) {
-      const w = Math.max(100, rawPoints[j].volume || 1000)
+      const w = Math.max(0, rawPoints[j].volume || 0)
+      if (w === 0) continue
       const diff = rawPoints[j].price - vwapRaw
       weightedSqSum += w * diff * diff
     }
@@ -152,7 +202,7 @@ function enrichWithVwapAndBollinger(
       (((pt.price - vwapRaw) / vwapRaw) * 100).toFixed(2)
     )
 
-    const isInflection = i === 0 || v >= avgVol * 1.25
+    const isInflection = i === 0 || (avgVol > 0 && v >= avgVol * 1.25)
 
     result.push({
       time: pt.time,
@@ -163,6 +213,7 @@ function enrichWithVwapAndBollinger(
       volume: Math.round(v),
       cumVolume: cumVol,
       isInflection,
+      isLatest: i === rawPoints.length - 1,
       vwapDeviationRate,
       vwapSigma,
       upperBand1Sigma,
@@ -179,8 +230,7 @@ function enrichWithVwapAndBollinger(
     })
   }
 
-  // Automatically annotate 2 key intraday points (1. VWAP bounce/cross entry, 2. ±2σ target)
-  // so the chart looks and reads just like the Chart Learning simulator!
+  // Automatically annotate up to 2 key intraday points when enough bars exist
   if (result.length >= 6) {
     let bestEntryIdx = -1
     let minAbsDiff = Infinity
@@ -193,7 +243,6 @@ function enrichWithVwapAndBollinger(
       const prev = result[i - 1]
       if (!next || !prev) continue
       const dist = Math.abs(cur.price - cur.vwap)
-      // Look for pullback bounce near VWAP or upward crossover
       if (next.price > cur.price && dist < minAbsDiff) {
         minAbsDiff = dist
         bestEntryIdx = i
@@ -208,7 +257,6 @@ function enrichWithVwapAndBollinger(
         pt.price >= pt.vwap ? 'VWAP押し目反発' : 'VWAPクロス注目'
     }
 
-    // Find peak deviation point in the latter half for ±2σ target marker
     let bestTargetIdx = -1
     let maxDev = -Infinity
     const targetStart = Math.max(
@@ -235,11 +283,11 @@ function enrichWithVwapAndBollinger(
   return result
 }
 
-// Generate full Tokyo Stock Exchange trading session (09:00〜15:30) matching the Chart Learning style
-function generateSimulatedSession(
+// Offline demo waveform generator (only used when offline/error and no prior live data)
+function generateOfflineFallbackSession(
   basePrice: number,
   codeSeedStr = '7011',
-  intervalType: '15m' | '5m' | '1m' = '15m'
+  intervalType: '15m' | '5m' | '1m' = '5m'
 ): VwapDataPoint[] {
   const rawPoints: RawPoint[] = []
   let currentPrice = basePrice
@@ -249,7 +297,6 @@ function generateSimulatedSession(
       .split('')
       .reduce((acc, ch, idx) => acc + ch.charCodeAt(0) * (idx + 1), 0) || 7011
 
-  // Exact 18 intraday time points for 15m mode (matching VwapBandSimulator!) or 5m slots
   const timeSlots: string[] =
     intervalType === '15m'
       ? [
@@ -292,7 +339,6 @@ function generateSimulatedSession(
           return slots
         })()
 
-  // Realistic intraday trend curve (opening surge -> mid-morning pullback to VWAP -> afternoon breakout toward +2σ)
   const patternMultipliers = [
     0.0, 0.011, 0.021, 0.024, 0.016, 0.012, 0.022, 0.029, 0.033, 0.036,
     0.03, 0.025, 0.022, 0.032, 0.039, 0.045, 0.049, 0.047,
@@ -337,7 +383,20 @@ function generateSimulatedSession(
     })
   }
 
-  return enrichWithVwapAndBollinger(rawPoints, 8)
+  return enrichWithVwapAndBollinger(
+    rawPoints,
+    intervalType === '1m' ? 20 : intervalType === '5m' ? 12 : 8
+  )
+}
+
+function formatJstHmFromSec(unixSec: number): string {
+  const date = new Date(unixSec * 1000)
+  return date.toLocaleTimeString('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
 }
 
 export const VwapChartCard: React.FC = () => {
@@ -346,10 +405,16 @@ export const VwapChartCard: React.FC = () => {
   const [selectedCode, setSelectedCode] = useState('7011')
   const [selectedName, setSelectedName] = useState('三菱重工')
   const [codeInput, setCodeInput] = useState('7011')
-  const [interval, setIntervalType] = useState<'15m' | '5m' | '1m'>('15m')
+  const [interval, setIntervalType] = useState<'15m' | '5m' | '1m'>('5m')
   const [isLoading, setIsLoading] = useState(false)
-  const [dataSourceLabel, setDataSourceLabel] = useState<string>('自動更新OFF')
+  const [autoRefresh, setAutoRefresh] = useState(true)
+  const [isLiveData, setIsLiveData] = useState(true)
+  const [fetchError, setFetchError] = useState<string | null>(null)
+  const [dataSourceLabel, setDataSourceLabel] = useState<string>('取得中...')
+  const [isMarketLiveNow, setIsMarketLiveNow] = useState(false)
   const [prevClose, setPrevClose] = useState<number | null>(null)
+  const [officialVwap, setOfficialVwap] = useState<number | null>(null)
+  const [ptsQuote, setPtsQuote] = useState<PtsQuoteInfo | null>(null)
   const [chartData, setChartData] = useState<VwapDataPoint[]>([])
 
   // Same toggle options as VwapBandSimulator ("VWAP±2σ チャート学習")
@@ -367,6 +432,14 @@ export const VwapChartCard: React.FC = () => {
   const dragStartRef = useRef<{ clientX: number; startPanX: number } | null>(
     null
   )
+  const fetchSeqRef = useRef(0)
+  const observedLiveBucketsRef = useRef<Map<string, ObservedLiveBucket[]>>(
+    new Map()
+  )
+  const resolvedNamesRef = useRef<Map<string, string>>(new Map())
+  const hasRealDataRef = useRef(false)
+  const selectedCodeRef = useRef(selectedCode)
+  selectedCodeRef.current = selectedCode
 
   // Measure viewport width for responsive horizontal panning bounds
   useEffect(() => {
@@ -461,93 +534,272 @@ export const VwapChartCard: React.FC = () => {
   const tickerListRef = useRef(tickerList)
   tickerListRef.current = tickerList
 
-  // Parse Yahoo Finance v8 chart response and compute cumulative Intraday VWAP + Bollinger Bands
-  const parseYahooChartAndComputeVwap = (rawChartResult: unknown): {
-    points: VwapDataPoint[]
-    previousClose: number | null
-    shortName?: string
-  } | null => {
-    try {
-      const root = rawChartResult as {
-        chart?: {
-          result?: Array<{
-            meta?: {
-              chartPreviousClose?: number
-              previousClose?: number
-              shortName?: string
-              symbol?: string
-            }
-            timestamp?: number[]
-            indicators?: {
-              quote?: Array<{
-                open?: Array<number | null>
-                high?: Array<number | null>
-                low?: Array<number | null>
-                close?: Array<number | null>
-                volume?: Array<number | null>
-              }>
-            }
-          }>
+  const parseChartAndComputeVwap = useCallback(
+    (
+      rawChartResult: unknown,
+      code: string,
+      intervalType: '15m' | '5m' | '1m'
+    ): {
+      points: VwapDataPoint[]
+      previousClose: number | null
+      officialVwap: number | null
+      shortName?: string
+      delayMinutes: number
+      sessionDate: string | null
+      japanUpdateTime: string | null
+      ptsQuote: PtsQuoteInfo | null
+      isRealtimeSessionNow: boolean
+    } | null => {
+      try {
+        const root = rawChartResult as {
+          chart?: {
+            result?: Array<{
+              meta?: {
+                chartPreviousClose?: number
+                previousClose?: number
+                shortName?: string
+                symbol?: string
+                regularMarketPrice?: number | null
+                regularMarketVolume?: number | null
+                officialVwap?: number | null
+                delayMinutes?: number
+                ptsPrice?: number | null
+                ptsPriceChange?: number | null
+                ptsPriceChangeRate?: number | null
+                ptsUpdateTime?: string | null
+                japanUpdateTime?: string | null
+                sessionDate?: string | null
+                lastDelayedBarTimestamp?: number | null
+              }
+              timestamp?: number[]
+              indicators?: {
+                quote?: Array<{
+                  open?: Array<number | null>
+                  high?: Array<number | null>
+                  low?: Array<number | null>
+                  close?: Array<number | null>
+                  volume?: Array<number | null>
+                  typicalPrice?: Array<number | null>
+                }>
+              }
+            }>
+          }
         }
-      }
 
-      const res = root?.chart?.result?.[0]
-      if (!res || !Array.isArray(res.timestamp) || !res.indicators?.quote?.[0]) {
+        const res = root?.chart?.result?.[0]
+        if (
+          !res ||
+          !Array.isArray(res.timestamp) ||
+          !res.indicators?.quote?.[0]
+        ) {
+          return null
+        }
+
+        const meta = res.meta || {}
+        const timestamps = res.timestamp
+        const quote = res.indicators.quote[0]
+        const highs = quote.high || []
+        const lows = quote.low || []
+        const closes = quote.close || []
+        const volumes = quote.volume || []
+        const typicals = quote.typicalPrice || []
+
+        const serverRawPoints: RawPoint[] = []
+        for (let i = 0; i < timestamps.length; i++) {
+          const c = closes[i]
+          if (c === null || c === undefined || !Number.isFinite(c)) continue
+
+          const h = highs[i] ?? c
+          const l = lows[i] ?? c
+          const v = Math.max(0, volumes[i] ?? 0)
+          const typicalPrice =
+            typicals[i] !== null &&
+            typicals[i] !== undefined &&
+            Number.isFinite(typicals[i])
+              ? (typicals[i] as number)
+              : (h + l + c) / 3
+
+          serverRawPoints.push({
+            time: formatJstHmFromSec(timestamps[i]),
+            timestamp: timestamps[i] * 1000,
+            price: c,
+            typicalPrice,
+            volume: v,
+          })
+        }
+
+        if (serverRawPoints.length === 0) return null
+
+        const jstNow = getJstNowInfo()
+        const sessionDate = meta.sessionDate || null
+        const delayMinutes =
+          typeof meta.delayMinutes === 'number' ? meta.delayMinutes : 20
+        const isRealtimeSessionNow =
+          Boolean(sessionDate && sessionDate === jstNow.dateStr) &&
+          delayMinutes === 0 &&
+          jstNow.isTseTradingHours
+
+        // During live TSE hours, accumulate client-side live 0-delay buckets past the 20m delayed bar cutoff
+        let finalRawPoints = serverRawPoints
+        const delayedCutoffSec = meta.lastDelayedBarTimestamp ?? null
+        const livePrice = meta.regularMarketPrice ?? null
+        const liveCumVol = meta.regularMarketVolume ?? 0
+
+        if (
+          isRealtimeSessionNow &&
+          delayedCutoffSec !== null &&
+          livePrice !== null &&
+          livePrice > 0
+        ) {
+          const bucketKey = `${code}:${sessionDate}:${intervalType}`
+          const delayedOnly = serverRawPoints.filter(
+            (p) => Math.round(p.timestamp / 1000) <= delayedCutoffSec
+          )
+          const delayedSumVol = delayedOnly.reduce((a, b) => a + b.volume, 0)
+          const delayedSumPV = delayedOnly.reduce(
+            (a, b) => a + b.typicalPrice * b.volume,
+            0
+          )
+
+          const serverTail = serverRawPoints.filter(
+            (p) => Math.round(p.timestamp / 1000) > delayedCutoffSec
+          )
+          const latestTsSec =
+            serverTail.length > 0
+              ? Math.round(serverTail[serverTail.length - 1].timestamp / 1000)
+              : Math.floor(Date.now() / 1000)
+
+          if (latestTsSec > delayedCutoffSec) {
+            const bucketSec =
+              intervalType === '1m' ? 60 : intervalType === '5m' ? 300 : 900
+            const bucketTsSec =
+              Math.floor((latestTsSec + 9 * 3600) / bucketSec) * bucketSec -
+              9 * 3600
+
+            const existingBuckets = (
+              observedLiveBucketsRef.current.get(bucketKey) || []
+            ).filter((b) => b.bucketTsSec > delayedCutoffSec)
+
+            const lastObserved = existingBuckets[existingBuckets.length - 1]
+            if (lastObserved && lastObserved.bucketTsSec === bucketTsSec) {
+              lastObserved.latestTsSec = latestTsSec
+              lastObserved.time = formatJstHmFromSec(latestTsSec)
+              lastObserved.high = Math.max(lastObserved.high, livePrice)
+              lastObserved.low = Math.min(lastObserved.low, livePrice)
+              lastObserved.close = livePrice
+              lastObserved.cumVol = Math.max(
+                lastObserved.cumVol,
+                liveCumVol || 0
+              )
+              lastObserved.officialVwap = meta.officialVwap ?? null
+            } else {
+              existingBuckets.push({
+                bucketTsSec,
+                latestTsSec,
+                time: formatJstHmFromSec(bucketTsSec),
+                open: lastObserved ? lastObserved.close : livePrice,
+                high: livePrice,
+                low: livePrice,
+                close: livePrice,
+                cumVol: Math.max(
+                  lastObserved ? lastObserved.cumVol : delayedSumVol,
+                  liveCumVol || 0
+                ),
+                officialVwap: meta.officialVwap ?? null,
+              })
+            }
+            observedLiveBucketsRef.current.set(bucketKey, existingBuckets)
+
+            if (existingBuckets.length >= 2) {
+              const livePoints: RawPoint[] = existingBuckets.map((b, idx) => {
+                const prevCum =
+                  idx === 0 ? delayedSumVol : existingBuckets[idx - 1].cumVol
+                const deltaVol = Math.max(0, b.cumVol - prevCum)
+                let tp = (b.high + b.low + b.close) / 3
+                if (
+                  idx === 0 &&
+                  b.officialVwap &&
+                  b.cumVol > 0 &&
+                  deltaVol > 0
+                ) {
+                  const rawGapTp =
+                    (b.officialVwap * b.cumVol - delayedSumPV) / deltaVol
+                  tp = Math.max(
+                    Math.min(b.low, b.close) * 0.99,
+                    Math.min(Math.max(b.high, b.close) * 1.01, rawGapTp)
+                  )
+                }
+                return {
+                  time:
+                    idx === existingBuckets.length - 1
+                      ? formatJstHmFromSec(b.latestTsSec)
+                      : b.time,
+                  timestamp:
+                    (idx === existingBuckets.length - 1
+                      ? b.latestTsSec
+                      : b.bucketTsSec) * 1000,
+                  price: b.close,
+                  typicalPrice: tp,
+                  volume: deltaVol,
+                }
+              })
+              finalRawPoints = [...delayedOnly, ...livePoints]
+            }
+          }
+        }
+
+        const bbPeriod =
+          intervalType === '1m' ? 20 : intervalType === '5m' ? 12 : 8
+
+        const ptsQuote: PtsQuoteInfo | null =
+          typeof meta.ptsPrice === 'number' && meta.ptsPrice > 0
+            ? {
+                price: meta.ptsPrice,
+                change:
+                  typeof meta.ptsPriceChange === 'number'
+                    ? meta.ptsPriceChange
+                    : null,
+                changeRate:
+                  typeof meta.ptsPriceChangeRate === 'number'
+                    ? meta.ptsPriceChangeRate
+                    : null,
+                updateTime: meta.ptsUpdateTime || null,
+              }
+            : null
+
+        return {
+          points: enrichWithVwapAndBollinger(finalRawPoints, bbPeriod),
+          previousClose: meta.chartPreviousClose ?? meta.previousClose ?? null,
+          officialVwap:
+            typeof meta.officialVwap === 'number' ? meta.officialVwap : null,
+          shortName: meta.shortName,
+          delayMinutes,
+          sessionDate,
+          japanUpdateTime: meta.japanUpdateTime || null,
+          ptsQuote,
+          isRealtimeSessionNow,
+        }
+      } catch {
         return null
       }
+    },
+    []
+  )
 
-      const timestamps = res.timestamp
-      const quote = res.indicators.quote[0]
-      const highs = quote.high || []
-      const lows = quote.low || []
-      const closes = quote.close || []
-      const volumes = quote.volume || []
-
-      const rawPoints: RawPoint[] = []
-
-      for (let i = 0; i < timestamps.length; i++) {
-        const c = closes[i]
-        if (c === null || c === undefined || !Number.isFinite(c)) continue
-
-        const h = highs[i] ?? c
-        const l = lows[i] ?? c
-        const v = Math.max(0, volumes[i] ?? 0)
-        const typicalPrice = (h + l + c) / 3
-
-        const date = new Date(timestamps[i] * 1000)
-        const jstStr = date.toLocaleTimeString('ja-JP', {
-          timeZone: 'Asia/Tokyo',
-          hour: '2-digit',
-          minute: '2-digit',
-          hour12: false,
-        })
-
-        rawPoints.push({
-          time: jstStr,
-          timestamp: timestamps[i] * 1000,
-          price: c,
-          typicalPrice,
-          volume: v,
-        })
-      }
-
-      if (rawPoints.length === 0) return null
-
-      return {
-        points: enrichWithVwapAndBollinger(rawPoints, 8),
-        previousClose:
-          res.meta?.chartPreviousClose ?? res.meta?.previousClose ?? null,
-        shortName: res.meta?.shortName,
-      }
-    } catch {
-      return null
-    }
-  }
-
-  // Only fetches when explicitly requested (ticker change, interval change, or manual refresh button)
   const fetchIntradayData = useCallback(
-    async (codeToFetch: string, intervalToFetch: '15m' | '5m' | '1m') => {
-      setIsLoading(true)
+    async (
+      codeToFetch: string,
+      intervalToFetch: '15m' | '5m' | '1m',
+      options?: { silent?: boolean; resetPan?: boolean }
+    ) => {
+      const silent = options?.silent ?? false
+      const resetPan = options?.resetPan ?? false
+      const seq = ++fetchSeqRef.current
+
+      if (!silent) {
+        setIsLoading(true)
+      }
+
       const cleanCode = codeToFetch.trim().toUpperCase()
       const yahooSym =
         /^\d{4}$/.test(cleanCode) || /^\d{3}[A-Z]$/.test(cleanCode)
@@ -555,81 +807,152 @@ export const VwapChartCard: React.FC = () => {
           : cleanCode
 
       try {
-        // 1. Try Vercel Serverless Function `/api/chart`
-        try {
-          const apiRes = await fetch(
-            `/api/chart?symbol=${encodeURIComponent(
-              yahooSym
-            )}&interval=${intervalToFetch}&range=1d`
+        const apiRes = await fetch(
+          `/api/chart?symbol=${encodeURIComponent(
+            yahooSym
+          )}&interval=${intervalToFetch}&range=1d&_t=${Date.now()}`,
+          { cache: 'no-store' }
+        )
+
+        if (seq !== fetchSeqRef.current) return
+
+        const contentType = apiRes.headers.get('content-type') || ''
+        if (apiRes.ok && contentType.includes('application/json')) {
+          const json = await apiRes.json()
+          const parsed = parseChartAndComputeVwap(
+            json.data,
+            cleanCode,
+            intervalToFetch
           )
-          const contentType = apiRes.headers.get('content-type') || ''
-          if (apiRes.ok && contentType.includes('application/json')) {
-            const json = await apiRes.json()
-            const parsed = parseYahooChartAndComputeVwap(json.data)
-            if (parsed && parsed.points.length > 0) {
-              setChartData(parsed.points)
-              setPrevClose(parsed.previousClose)
+          if (parsed && parsed.points.length > 0) {
+            hasRealDataRef.current = true
+            setIsLiveData(true)
+            setFetchError(null)
+            setChartData(parsed.points)
+            setPrevClose(parsed.previousClose)
+            setOfficialVwap(parsed.officialVwap)
+            setPtsQuote(parsed.ptsQuote)
+            setIsMarketLiveNow(parsed.isRealtimeSessionNow)
+
+            if (resetPan) {
               setPanX(0)
-              const lastTime =
-                parsed.points[parsed.points.length - 1]?.time || ''
-              setDataSourceLabel(
-                `東証データ (09:00〜${lastTime}・自動更新OFF)`
-              )
-              setIsLoading(false)
-              return
             }
+
+            if (
+              parsed.shortName &&
+              parsed.shortName !== yahooSym &&
+              parsed.shortName !== cleanCode
+            ) {
+              resolvedNamesRef.current.set(cleanCode, parsed.shortName)
+              if (selectedCodeRef.current === cleanCode) {
+                setSelectedName((curr) =>
+                  curr.startsWith('銘柄 ') ? parsed.shortName! : curr
+                )
+              }
+            }
+
+            const jst = getJstNowInfo()
+            const lastTime =
+              parsed.points[parsed.points.length - 1]?.time || ''
+            const shortDate = parsed.sessionDate
+              ? parsed.sessionDate.slice(5).replace('-', '/')
+              : ''
+
+            if (parsed.isRealtimeSessionNow) {
+              setDataSourceLabel(
+                `LIVE 遅延0分 (${parsed.japanUpdateTime || lastTime}・${jst.nowHms}取得)`
+              )
+            } else {
+              setDataSourceLabel(
+                `東証実データ (${shortDate ? `${shortDate} ` : ''}〜${lastTime})`
+              )
+            }
+            if (!silent) setIsLoading(false)
+            return
           }
-        } catch {
-          // Proceed to Step 2
         }
 
-        // 2. Try local Vite dev server proxy `/yahoo-api`
-        try {
-          const viteProxyRes = await fetch(
-            `/yahoo-api/v8/finance/chart/${encodeURIComponent(
-              yahooSym
-            )}?interval=${intervalToFetch}&range=1d&includePrePost=false`
-          )
-          const contentType = viteProxyRes.headers.get('content-type') || ''
-          if (viteProxyRes.ok && contentType.includes('application/json')) {
-            const rawData = await viteProxyRes.json()
-            const parsed = parseYahooChartAndComputeVwap(rawData)
-            if (parsed && parsed.points.length > 0) {
-              setChartData(parsed.points)
-              setPrevClose(parsed.previousClose)
-              setPanX(0)
-              const lastTime =
-                parsed.points[parsed.points.length - 1]?.time || ''
-              setDataSourceLabel(
-                `東証データ (09:00〜${lastTime}・自動更新OFF)`
-              )
-              setIsLoading(false)
-              return
-            }
+        if (apiRes.status === 404) {
+          setFetchError(`銘柄「${cleanCode}」のデータが見つかりません`)
+          if (!silent) {
+            showToast(`銘柄「${cleanCode}」の取引データが見つかりませんでした`)
           }
-        } catch {
-          // Proceed to fallback
+          if (!silent) setIsLoading(false)
+          return
         }
 
-        throw new Error('Fallback to simulated intraday data')
+        throw new Error(`HTTP ${apiRes.status}`)
       } catch {
+        if (seq !== fetchSeqRef.current) return
+
+        // On background poll, preserve existing real chart instead of overwriting with fallback
+        if (silent && hasRealDataRef.current) {
+          setFetchError('一時的に通信再試行中...')
+          return
+        }
+
         const matched = tickerListRef.current.find((t) => t.code === cleanCode)
         const base = matched?.basePrice || 2000
-        const sim = generateSimulatedSession(base, cleanCode, intervalToFetch)
+        const sim = generateOfflineFallbackSession(
+          base,
+          cleanCode,
+          intervalToFetch
+        )
+        hasRealDataRef.current = false
+        setIsLiveData(false)
+        setFetchError('実データ取得エラー（オフライン参考波形を表示中）')
         setChartData(sim)
         setPrevClose(base)
-        setPanX(0)
-        setDataSourceLabel('09:00〜15:30 全日波形（自動更新OFF）')
+        setOfficialVwap(null)
+        setPtsQuote(null)
+        setIsMarketLiveNow(false)
+        if (resetPan) setPanX(0)
+        setDataSourceLabel('オフライン参考波形（取得失敗）')
       } finally {
-        setIsLoading(false)
+        if (!silent && seq === fetchSeqRef.current) {
+          setIsLoading(false)
+        }
       }
     },
-    []
+    [parseChartAndComputeVwap, showToast]
   )
 
+  // Initial fetch & ticker/interval switch (resets panX cleanly ONLY on switch)
   useEffect(() => {
-    void fetchIntradayData(selectedCode, interval)
+    hasRealDataRef.current = false
+    void fetchIntradayData(selectedCode, interval, {
+      silent: false,
+      resetPan: true,
+    })
   }, [selectedCode, interval, fetchIntradayData])
+
+  // Real-time auto-refresh polling (preserves user's scroll/panX!)
+  useEffect(() => {
+    if (!autoRefresh) return
+
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'hidden') return
+      void fetchIntradayData(selectedCode, interval, {
+        silent: true,
+        resetPan: false,
+      })
+    }, POLL_INTERVAL_MS)
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void fetchIntradayData(selectedCode, interval, {
+          silent: true,
+          resetPan: false,
+        })
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [autoRefresh, selectedCode, interval, fetchIntradayData])
 
   const latestPoint =
     chartData.length > 0 ? chartData[chartData.length - 1] : null
@@ -639,6 +962,11 @@ export const VwapChartCard: React.FC = () => {
   const vwapDiffPercent =
     currentVwap > 0 ? (vwapDiff / currentVwap) * 100 : 0
   const isAboveVwap = vwapDiff >= 0
+
+  const prevCloseDiff =
+    prevClose && currentPrice > 0 ? currentPrice - prevClose : null
+  const prevCloseDiffPct =
+    prevClose && prevCloseDiff !== null ? (prevCloseDiff / prevClose) * 100 : null
 
   const activeUpper2 = latestPoint ? latestPoint.upperBand2Sigma : 0
   const activeLower2 = latestPoint ? latestPoint.lowerBand2Sigma : 0
@@ -720,8 +1048,9 @@ export const VwapChartCard: React.FC = () => {
     const clean = codeInput.trim().toUpperCase()
     if (!clean) return
     const matched = tickerList.find((t) => t.code === clean)
+    const cachedName = resolvedNamesRef.current.get(clean)
     setSelectedCode(clean)
-    setSelectedName(matched ? matched.name : `銘柄 ${clean}`)
+    setSelectedName(matched?.name || cachedName || `銘柄 ${clean}`)
   }
 
   const applyPriceToOco = (targetPrice: number, sourceName: string) => {
@@ -753,14 +1082,30 @@ export const VwapChartCard: React.FC = () => {
               銘柄別 VWAP±2σ ＆ ボリンジャーチャート
             </h2>
           </div>
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700">
-            <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
+          <span
+            className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+              !isLiveData
+                ? 'bg-rose-950/60 text-rose-200 border-rose-500/40'
+                : isMarketLiveNow
+                ? 'bg-emerald-950/70 text-emerald-200 border-emerald-500/40'
+                : 'bg-slate-800 text-slate-300 border-slate-700'
+            }`}
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                !isLiveData
+                  ? 'bg-rose-400'
+                  : isMarketLiveNow
+                  ? 'bg-emerald-400 animate-pulse'
+                  : 'bg-sky-400'
+              }`}
+            />
             {dataSourceLabel}
           </span>
         </div>
 
-        {/* 15m / 5m / 1m + Manual Refresh */}
-        <div className="flex items-center gap-1.5">
+        {/* 15m / 5m / 1m + Auto-Refresh + Manual Refresh */}
+        <div className="flex items-center gap-1.5 flex-wrap">
           <div className="bg-[#0f172a] p-0.5 rounded-lg border border-slate-700 flex text-[11px] font-bold">
             <button
               type="button"
@@ -799,7 +1144,28 @@ export const VwapChartCard: React.FC = () => {
 
           <button
             type="button"
-            onClick={() => void fetchIntradayData(selectedCode, interval)}
+            onClick={() => setAutoRefresh((v) => !v)}
+            className={`px-2 py-1.5 rounded-lg border text-[11px] font-bold flex items-center gap-1 active:scale-95 transition ${
+              autoRefresh
+                ? 'bg-emerald-600/20 text-emerald-300 border-emerald-500/50'
+                : 'bg-slate-800 text-slate-400 border-slate-700'
+            }`}
+            title="10秒間隔での自動更新を切り替え（スクロール位置は維持されます）"
+          >
+            <Radio
+              className={`w-3 h-3 ${autoRefresh ? 'text-emerald-400 animate-pulse' : ''}`}
+            />
+            {autoRefresh ? '自動更新ON' : '自動更新OFF'}
+          </button>
+
+          <button
+            type="button"
+            onClick={() =>
+              void fetchIntradayData(selectedCode, interval, {
+                silent: false,
+                resetPan: false,
+              })
+            }
             className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 text-[11px] font-bold flex items-center gap-1 active:scale-95 transition"
           >
             <RefreshCw
@@ -809,6 +1175,14 @@ export const VwapChartCard: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Warning banner only when fetch error happened */}
+      {fetchError && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-200 text-[11px] font-bold">
+          <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+          <span>{fetchError}</span>
+        </div>
+      )}
 
       {/* Stock Picker Row */}
       <div className="space-y-2">
@@ -842,7 +1216,7 @@ export const VwapChartCard: React.FC = () => {
               value={codeInput}
               onFocus={(e) => e.target.select()}
               onChange={(e) => setCodeInput(e.target.value)}
-              placeholder="証券コード4桁を入力 (例: 7011, 7203, 9101)"
+              placeholder="証券コードを入力 (例: 7011, 7203, 141A)"
               className="w-full bg-transparent text-xs text-white placeholder:text-slate-500 focus:outline-none font-bold"
             />
           </div>
@@ -856,63 +1230,112 @@ export const VwapChartCard: React.FC = () => {
       </div>
 
       {/* Current Price vs VWAP & ±2σ Summary Banner */}
-      <div className="grid grid-cols-3 gap-2 bg-[#0f172a] rounded-2xl p-3 border border-slate-700/90 items-center">
-        <div>
-          <div className="text-[11px] text-slate-400 font-bold flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-[#38bdf8] inline-block" />
-            現在株価 ({selectedCode})
+      <div className="bg-[#0f172a] rounded-2xl p-3 border border-slate-700/90 space-y-2">
+        <div className="grid grid-cols-3 gap-2 items-center">
+          <div>
+            <div className="text-[11px] text-slate-400 font-bold flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-[#38bdf8] inline-block" />
+              現在株価 ({selectedCode})
+            </div>
+            <div className="text-xl sm:text-2xl font-extrabold text-[#38bdf8] tracking-tight mt-0.5">
+              {currentPrice > 0 ? `${formatNumber(currentPrice, 1)}円` : '---'}
+            </div>
+            <div className="text-[10px] font-bold text-slate-400 mt-0.5">
+              {prevCloseDiff !== null && prevCloseDiffPct !== null ? (
+                <span
+                  className={`inline-flex items-center ${
+                    prevCloseDiff >= 0 ? 'text-rose-400' : 'text-emerald-400'
+                  }`}
+                >
+                  前日比 {prevCloseDiff >= 0 ? '+' : ''}
+                  {formatNumber(prevCloseDiff, 1)}円 ({prevCloseDiff >= 0 ? '+' : ''}
+                  {prevCloseDiffPct.toFixed(2)}%)
+                </span>
+              ) : isAboveVwap ? (
+                <span className="text-emerald-400 inline-flex items-center">
+                  <ArrowUpRight className="w-3 h-3" />
+                  VWAP +{vwapDiff.toFixed(1)}円
+                </span>
+              ) : (
+                <span className="text-rose-400 inline-flex items-center">
+                  <ArrowDownRight className="w-3 h-3" />
+                  VWAP {vwapDiff.toFixed(1)}円
+                </span>
+              )}
+            </div>
           </div>
-          <div className="text-xl sm:text-2xl font-extrabold text-[#38bdf8] tracking-tight mt-0.5">
-            {currentPrice > 0 ? `${formatNumber(currentPrice, 1)}円` : '---'}
+
+          <div>
+            <div className="text-[11px] text-amber-300 font-bold flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-[#f59e0b] inline-block" />
+              累計VWAP
+            </div>
+            <div className="text-xl sm:text-2xl font-extrabold text-[#f59e0b] tracking-tight mt-0.5">
+              {currentVwap > 0 ? `${formatNumber(currentVwap, 1)}円` : '---'}
+            </div>
+            <div className="text-[10px] font-bold text-slate-400 mt-0.5">
+              VWAP乖離: {vwapDiffPercent >= 0 ? '+' : ''}
+              {vwapDiffPercent.toFixed(2)}%
+              {officialVwap !== null &&
+                Math.abs(officialVwap - currentVwap) >= 0.3 && (
+                  <span className="ml-1 text-amber-200/80">
+                    (公式{formatNumber(officialVwap, 1)})
+                  </span>
+                )}
+            </div>
           </div>
-          <div className="text-[10px] font-bold text-slate-400 mt-0.5">
-            {isAboveVwap ? (
-              <span className="text-emerald-400 inline-flex items-center">
-                <ArrowUpRight className="w-3 h-3" />
-                VWAP +{vwapDiff.toFixed(1)}円
+
+          <div className="text-right">
+            <div className="text-[10px] text-purple-300 font-bold">
+              バンド位置 (σ)
+            </div>
+            <div className="text-sm sm:text-base font-extrabold text-white font-mono mt-0.5">
+              {activeSigmaScore >= 0 ? '+' : ''}
+              {activeSigmaScore.toFixed(2)}σ
+            </div>
+            <div className="text-[10px] font-mono text-slate-300 mt-0.5">
+              <span className="text-rose-300">+2σ:{Math.round(activeUpper2)}</span>{' '}
+              /{' '}
+              <span className="text-emerald-300">
+                -2σ:{Math.round(activeLower2)}
               </span>
-            ) : (
-              <span className="text-rose-400 inline-flex items-center">
-                <ArrowDownRight className="w-3 h-3" />
-                VWAP {vwapDiff.toFixed(1)}円
-              </span>
-            )}
+            </div>
           </div>
         </div>
 
-        <div>
-          <div className="text-[11px] text-amber-300 font-bold flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-[#f59e0b] inline-block" />
-            累計VWAP
-          </div>
-          <div className="text-xl sm:text-2xl font-extrabold text-[#f59e0b] tracking-tight mt-0.5">
-            {currentVwap > 0 ? `${formatNumber(currentVwap, 1)}円` : '---'}
-          </div>
-          <div className="text-[10px] font-bold text-slate-400 mt-0.5">
-            乖離率: {vwapDiffPercent >= 0 ? '+' : ''}
-            {vwapDiffPercent.toFixed(2)}%
-          </div>
-        </div>
-
-        <div className="text-right">
-          <div className="text-[10px] text-purple-300 font-bold">
-            バンド位置 (σ)
-          </div>
-          <div className="text-sm sm:text-base font-extrabold text-white font-mono mt-0.5">
-            {activeSigmaScore >= 0 ? '+' : ''}
-            {activeSigmaScore.toFixed(2)}σ
-          </div>
-          <div className="text-[10px] font-mono text-slate-300 mt-0.5">
-            <span className="text-rose-300">+2σ:{Math.round(activeUpper2)}</span>{' '}
-            /{' '}
-            <span className="text-emerald-300">
-              -2σ:{Math.round(activeLower2)}
+        {/* Optional Night PTS Market Reference Strip */}
+        {ptsQuote && (
+          <div className="flex items-center justify-between pt-2 border-t border-slate-800 text-[11px]">
+            <span className="text-slate-400 font-bold flex items-center gap-1.5">
+              <span className="px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-[9px] font-extrabold">
+                PTS夜間
+              </span>
+              {ptsQuote.updateTime && (
+                <span className="text-slate-500 font-mono">
+                  ({ptsQuote.updateTime})
+                </span>
+              )}
+            </span>
+            <span className="font-mono font-extrabold text-indigo-200">
+              {formatNumber(ptsQuote.price, 1)}円
+              {ptsQuote.change !== null && ptsQuote.changeRate !== null && (
+                <span
+                  className={`ml-1.5 ${
+                    ptsQuote.change >= 0 ? 'text-rose-400' : 'text-emerald-400'
+                  }`}
+                >
+                  ({ptsQuote.change >= 0 ? '+' : ''}
+                  {formatNumber(ptsQuote.change, 1)}円 /{' '}
+                  {ptsQuote.change >= 0 ? '+' : ''}
+                  {ptsQuote.changeRate.toFixed(2)}%)
+                </span>
+              )}
             </span>
           </div>
-        </div>
+        )}
       </div>
 
-      {/* Main + Volume 2-Tier Synchronized Chart (Exact same visual structure as VWAP±2σ チャート学習!) */}
+      {/* Main + Volume 2-Tier Synchronized Chart */}
       <div className="bg-[#0f172a] rounded-2xl p-3 border border-slate-700/90 space-y-2.5">
         {/* Chart Top Controls: Title + Zoom + Bollinger Toggle + ±1σ Toggle */}
         <div className="flex items-center justify-between flex-wrap gap-2">
@@ -1009,7 +1432,7 @@ export const VwapChartCard: React.FC = () => {
           </div>
         </div>
 
-        {/* Legend (Matches VwapBandSimulator!) */}
+        {/* Legend */}
         <div className="flex items-center flex-wrap gap-x-3 gap-y-1 text-[11px] font-bold">
           <span className="flex items-center gap-1 text-[#38bdf8]">
             <span className="w-3 h-0.5 bg-[#38bdf8] inline-block" />
@@ -1035,20 +1458,20 @@ export const VwapChartCard: React.FC = () => {
           )}
         </div>
 
-        {/* Interactive Click-and-Drag Chart Box (Pinned Y-Axis + Upper Main Chart + Lower Volume BarChart) */}
+        {/* Interactive Click-and-Drag Chart Box */}
         <div className="relative rounded-xl border border-slate-800 bg-[#0b1120] overflow-hidden">
           <div className="flex">
             {/* Pinned Left Y-Axis Column (Price + Volume) */}
-            <div className="w-12 shrink-0 border-r border-slate-800/90 bg-[#0f172a]/95 z-10 select-none flex flex-col">
+            <div className="w-14 shrink-0 border-r border-slate-800/90 bg-[#0f172a]/95 z-10 select-none flex flex-col">
               <div className="h-[268px] pt-[28px] pb-[22px] px-1.5 flex flex-col justify-between items-end text-[10px] font-mono text-slate-400">
                 {yTicks.map((t) => (
                   <span key={t} className="leading-none">
-                    {t}
+                    {t.toLocaleString()}
                   </span>
                 ))}
               </div>
               <div className="h-24 border-t border-slate-800/80 pt-1.5 pb-4 px-1.5 flex flex-col justify-between items-end text-[9px] font-mono text-slate-500">
-                <span>{maxVolume.toLocaleString()}</span>
+                <span>{formatCompactVolume(maxVolume)}</span>
                 <span>出来高</span>
                 <span>0</span>
               </div>
@@ -1182,6 +1605,22 @@ export const VwapChartCard: React.FC = () => {
                         }}
                       />
 
+                      {/* Previous Close Horizontal Reference Line */}
+                      {prevClose !== null && Number.isFinite(prevClose) && (
+                        <ReferenceLine
+                          y={prevClose}
+                          stroke="#64748b"
+                          strokeDasharray="3 3"
+                          label={{
+                            value: `前日終値 ${formatNumber(prevClose, 1)}`,
+                            position: 'insideTopRight',
+                            fill: '#94a3b8',
+                            fontSize: 9,
+                            fontWeight: 700,
+                          }}
+                        />
+                      )}
+
                       {/* Shaded Ribbon Fill for VWAP ±2σ and ±1σ */}
                       <Area
                         type="monotone"
@@ -1245,7 +1684,7 @@ export const VwapChartCard: React.FC = () => {
                       {/* Vertical reference lines on key signal points */}
                       {signalPoints.map((sp) => (
                         <ReferenceLine
-                          key={sp.time}
+                          key={`${sp.time}-${sp.timestamp}`}
                           x={sp.time}
                           stroke={
                             sp.signalType === 'entry_buy'
@@ -1323,7 +1762,7 @@ export const VwapChartCard: React.FC = () => {
                         isAnimationActive={false}
                       />
 
-                      {/* Intraday Price Line (Sky Blue with Signal Dots) */}
+                      {/* Intraday Price Line (Sky Blue with Signal & Live Edge Dots) */}
                       <Line
                         type="monotone"
                         dataKey="price"
@@ -1343,13 +1782,29 @@ export const VwapChartCard: React.FC = () => {
                           ) {
                             return <g key="empty" />
                           }
-                          if (!payload.signalLabel) {
+                          if (payload.isLatest) {
                             return (
                               <circle
-                                key={payload.time}
+                                key={`latest-${payload.time}-${payload.timestamp}`}
                                 cx={cx}
                                 cy={cy}
-                                r={interval === '15m' ? 3 : 2}
+                                r={5}
+                                fill="#38bdf8"
+                                stroke="#ffffff"
+                                strokeWidth={2}
+                              />
+                            )
+                          }
+                          if (!payload.signalLabel) {
+                            if (interval === '1m') {
+                              return <g key={`${payload.time}-${payload.timestamp}`} />
+                            }
+                            return (
+                              <circle
+                                key={`${payload.time}-${payload.timestamp}`}
+                                cx={cx}
+                                cy={cy}
+                                r={interval === '15m' ? 3 : 1.75}
                                 fill="#38bdf8"
                               />
                             )
@@ -1362,10 +1817,10 @@ export const VwapChartCard: React.FC = () => {
                               : '#f59e0b'
                           return (
                             <circle
-                              key={payload.time}
+                              key={`${payload.time}-${payload.timestamp}`}
                               cx={cx}
                               cy={cy}
-                              r={6}
+                              r={5.5}
                               fill={fill}
                               stroke="#ffffff"
                               strokeWidth={2}
@@ -1407,7 +1862,7 @@ export const VwapChartCard: React.FC = () => {
                       >
                         {chartData.map((entry) => (
                           <Cell
-                            key={entry.time}
+                            key={`${entry.time}-${entry.timestamp}`}
                             fill={entry.isInflection ? '#f59e0b' : '#475569'}
                           />
                         ))}
@@ -1445,11 +1900,13 @@ export const VwapChartCard: React.FC = () => {
 
         <button
           type="button"
-          onClick={() => applyPriceToOco(currentVwap, 'VWAP値')}
+          onClick={() =>
+            applyPriceToOco(officialVwap ?? currentVwap, 'VWAP値')
+          }
           className="py-2 px-2.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/50 text-amber-300 text-xs font-extrabold flex items-center justify-center gap-1 active:scale-95 transition"
         >
           <Activity className="w-3.5 h-3.5 shrink-0" />
-          VWAP ({Math.round(currentVwap).toLocaleString()}円)
+          VWAP ({Math.round(officialVwap ?? currentVwap).toLocaleString()}円)
         </button>
 
         <button
